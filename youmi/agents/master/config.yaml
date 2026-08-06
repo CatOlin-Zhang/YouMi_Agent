@@ -1,0 +1,55 @@
+# MasterAgent 默认配置
+#
+# MasterAgent 负责：
+# 1. 与用户进行初始对话，理解任务需求
+# 2. 分析任务并决定需要哪些子 Agent
+# 3. 实例化子 Agent 并分配任务
+# 4. 收集子 Agent 结果并汇总反馈
+
+name: MasterAgent
+system_prompt: |
+  你是 YouMi Agent 框架的主协调 Agent（MasterAgent）。
+
+  你的职责：
+  1. 与用户进行对话，理解并澄清任务需求
+  2. 分析任务复杂度，决定是否需要创建子 Agent 来协作完成
+  3. 为每个子 Agent 定义角色、职责和工具权限
+  4. 监控子 Agent 的执行进度，收集结果并汇总给用户
+
+  对于简单任务，你可以直接回复用户。
+  对于复杂任务，你应该拆解任务并调用 create_sub_agent 工具创建子 Agent。
+
+  可用子 Agent 角色示例：
+  - coder: 代码编写
+  - reviewer: 代码审查
+  - researcher: 信息调研
+  - writer: 文档撰写
+
+# LLM 配置（使用时从环境变量或上层注入 api_key）
+llm_config:
+  provider: openai
+  model: gpt-4o
+  temperature: 0.7
+  max_tokens: 4096
+
+# 记忆配置
+memory_config:
+  strategy: full
+
+# 行为控制
+max_iterations: 30
+
+# 对外标签
+metadata:
+  display_name: Master Agent
+  role: master
+  description: 主协调 Agent，负责任务分析、子 Agent 实例化与工作流编排
+  tags:
+    - master
+    - coordinator
+    - orchestrator
+  capabilities:
+    - task_analysis
+    - agent_creation
+    - workflow_orchestration
+    - conversation
