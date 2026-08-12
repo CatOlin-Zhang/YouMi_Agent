@@ -168,6 +168,98 @@ class AgentMetadata(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 工具装配配置
+# ---------------------------------------------------------------------------
+
+class BuiltinToolsConfig(BaseModel):
+    """内置工具装配配置
+
+    支持两种互斥模式:
+    - include (白名单): 只注册列出的工具，其余全部排除
+    - exclude (黑名单): 注册所有内置工具，排除列出的工具
+
+    两者同时配置时，include 优先；两者均为空时等价于全量注册。
+    """
+
+    include: list[str] = Field(
+        default_factory=list,
+        description="白名单：只注册这些内置工具（为空则不限制，配合 exclude 使用）",
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        description="黑名单：排除这些内置工具（include 非空时此字段被忽略）",
+    )
+
+    model_config = {"frozen": True}
+
+    def resolve(self, all_tool_names: list[str]) -> list[str]:
+        """根据 include/exclude 计算最终要注册的工具名称列表
+
+        Args:
+            all_tool_names: 所有可用内置工具的名称列表
+
+        Returns:
+            最终应注册的工具名称列表
+        """
+        if self.include:
+            # 白名单模式：只保留在 all_tool_names 中存在的
+            valid = set(all_tool_names)
+            return [n for n in self.include if n in valid]
+        if self.exclude:
+            # 黑名单模式：排除指定的
+            excluded = set(self.exclude)
+            return [n for n in all_tool_names if n not in excluded]
+        # 都为空：全量注册
+        return list(all_tool_names)
+
+
+class CustomToolRef(BaseModel):
+    """自定义工具引用（预留扩展）
+
+    通过 module + function 定位一个 Python 函数，
+    Agent 初始化时动态导入并注册为工具。
+    """
+
+    name: str = Field(description="工具名称")
+    module: str = Field(description="Python 模块路径，如 youmi.tools.code_ops")
+    function: str = Field(description="模块内的函数名")
+    description: str = Field(default="", description="工具功能描述（可选覆盖）")
+
+    model_config = {"frozen": True}
+
+
+class ToolsConfig(BaseModel):
+    """Agent 工具装配总配置
+
+    声明式定义 Agent 需要注册哪些工具，支持：
+    - builtin: 内置工具（file_read / shell_exec 等）的 include/exclude
+    - custom: 自定义工具函数引用（未来扩展）
+
+    为空时保持向后兼容（全量注册内置工具）。
+    """
+
+    builtin: BuiltinToolsConfig = Field(
+        default_factory=BuiltinToolsConfig,
+        description="内置工具装配规则",
+    )
+    custom: list[CustomToolRef] = Field(
+        default_factory=list,
+        description="自定义工具引用列表（预留）",
+    )
+
+    model_config = {"frozen": True}
+
+    @property
+    def is_empty(self) -> bool:
+        """是否未做任何工具声明（向后兼容标志）"""
+        return (
+            not self.builtin.include
+            and not self.builtin.exclude
+            and not self.custom
+        )
+
+
+# ---------------------------------------------------------------------------
 # Agent 间消息
 # ---------------------------------------------------------------------------
 

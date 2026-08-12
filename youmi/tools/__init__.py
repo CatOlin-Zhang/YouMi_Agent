@@ -30,6 +30,13 @@ from youmi.tools.file_ops import (
 from youmi.tools.shell_ops import shell_exec
 from youmi.tools.web_ops import web_fetch
 from youmi.tools.data_ops import get_datetime, json_tool
+from youmi.tools.coordinator_ops import (
+    register_coordinator_tools,
+    create_sub_agent,
+    run_sub_agent,
+    list_sub_agents,
+    list_available_roles,
+)
 
 __all__ = [
     "BuiltinToolProvider",
@@ -42,4 +49,10 @@ __all__ = [
     "web_fetch",
     "get_datetime",
     "json_tool",
+    # Coordinator tools
+    "register_coordinator_tools",
+    "create_sub_agent",
+    "run_sub_agent",
+    "list_sub_agents",
+    "list_available_roles",
 ]

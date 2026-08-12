@@ -12,9 +12,47 @@ MCP 协议消息类型
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# 工具问题汇报
+# ---------------------------------------------------------------------------
+
+class ToolIssueType(str, Enum):
+    """工具问题分类 — Agent 向 ToolGuardianAgent 汇报时的错误类型"""
+
+    UNCLEAR_DESCRIPTION = "unclear_description"
+    PARAMETER_BOUNDARY = "parameter_boundary"
+    MISSING_FEATURE = "missing_feature"
+    UNEXPECTED_BEHAVIOR = "unexpected_behavior"
+    ERROR_HANDLING = "error_handling"
+    OTHER = "other"
+
+
+class ToolIssueReport(BaseModel):
+    """工具问题汇报 — 由调用工具的 Agent 构造，发送给 ToolGuardianAgent
+
+    汇报流程:
+    1. Agent 调用工具发生错误
+    2. Agent 根据错误情况分类 issue_type
+    3. 构造 ToolIssueReport 并发送给 ToolGuardianAgent
+    4. ToolGuardianAgent 根据报告决定修改工具描述或生成代码修改建议
+    """
+
+    report_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    reporter_agent_id: str
+    tool_name: str
+    issue_type: ToolIssueType
+    error_message: str = ""
+    call_arguments: dict[str, Any] = Field(default_factory=dict)
+    error_traceback: str = ""
+    suggestion: str = Field(default="", description="汇报者对问题的初步建议")
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
 # ---------------------------------------------------------------------------

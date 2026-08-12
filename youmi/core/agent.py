@@ -21,6 +21,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import traceback as _traceback_mod
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -36,6 +38,7 @@ from youmi.core.types import (
     MemoryConfig,
     MessageRole,
     RetryPolicy,
+    ToolsConfig,
 )
 from youmi.core.tool import ToolRegistry
 from youmi.llm.client import LLMClient, LLMResponse
@@ -116,6 +119,12 @@ class AgentConfig(BaseModel):
     # 授权范围 (空列表表示不限制，由上层工厂填充)
     allowed_skills: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
+
+    # 工具装配（声明式注册，为空时保持向后兼容）
+    tools: ToolsConfig = Field(
+        default_factory=ToolsConfig,
+        description="工具装配配置：声明 Agent 需要注册哪些工具",
+    )
 
     # 对外标签
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)
@@ -269,6 +278,10 @@ class Agent:
         self._bus: Any = None  # MessageBroker | None
         self._workflow_id: str = ""  # 当前工作流 ID
 
+        # ToolGuardian 连接 (connect_guardian 后设置)
+        self._tool_guardian_id: str = ""
+        self._tool_guardian_bus: Any = None  # 用于向 guardian 发送汇报的 broker
+
         # 运行期间的完整消息列表 (包含 tool_calls / tool results)
         self._conversation: list[dict[str, Any]] = []
 
@@ -372,20 +385,66 @@ class Agent:
         将 file_search / file_read / file_write / shell_exec 等内置工具
         直接注册到 Agent 的 ToolRegistry。
 
+        优先级：
+        - 如果显式传入 exclude，使用传入值（向后兼容）
+        - 如果 exclude=None 且 config.tools 有声明，按 config.tools.builtin 装配
+        - 否则全量注册（向后兼容）
+
         Args:
             exclude: 要排除的工具名称列表
         """
         from youmi.tools.builtin import BuiltinToolProvider
 
-        bp = BuiltinToolProvider(work_dir=self._env, exclude=exclude)
+        # 确定排除列表：参数优先 > config > 默认全量
+        effective_exclude = self._resolve_builtin_exclude(exclude)
+        bp = BuiltinToolProvider(work_dir=self._env, exclude=effective_exclude)
+
+        registered = 0
         for name, defn in bp._definitions.items():
             if name not in self._tool_registry:
                 handler = bp._handlers.get(name)
                 if handler:
                     self._tool_registry.register(defn, handler)
+                    registered += 1
 
-        logger.info("Agent '%s' registered %d builtin tools",
-                     self.name, len(bp._definitions))
+        logger.info("Agent '%s' registered %d builtin tools (exclude=%s)",
+                     self.name, registered, effective_exclude)
+
+    def _resolve_builtin_exclude(self, explicit_exclude: list[str] | None) -> list[str]:
+        """计算内置工具排除列表
+
+        优先级：显式参数 > config.tools.builtin > 空列表（全量）
+
+        Args:
+            explicit_exclude: 调用方显式传入的排除列表
+
+        Returns:
+            最终生效的排除列表
+        """
+        if explicit_exclude is not None:
+            return explicit_exclude
+
+        tools_cfg = self._config.tools
+        if tools_cfg.builtin.include:
+            # 白名单模式：排除 = 所有内置工具 - include
+            from youmi.tools.builtin import BuiltinToolProvider
+            all_names = list(BuiltinToolProvider(work_dir=self._env, exclude=[])._definitions.keys())
+            included = set(tools_cfg.builtin.include)
+            return [n for n in all_names if n not in included]
+
+        # 黑名单模式（或全量）
+        return list(tools_cfg.builtin.exclude)
+
+    def _get_builtin_include(self) -> list[str] | None:
+        """获取内置工具白名单（如有）
+
+        Returns:
+            白名单列表，None 表示不限定白名单（使用排除模式或全量）
+        """
+        tools_cfg = self._config.tools
+        if tools_cfg.builtin.include:
+            return list(tools_cfg.builtin.include)
+        return None
 
     def connect_bus(
         self,
@@ -410,6 +469,132 @@ class Agent:
             self.name, workflow_id or "pending",
         )
 
+    def connect_guardian(
+        self,
+        guardian_id: str,
+        broker: Any = None,  # MessageBroker
+        workflow_id: str = "",
+    ) -> None:
+        """连接 ToolGuardianAgent，启用工具错误汇报闭环
+
+        连接后，Agent 在工具调用失败时会自动分类错误并汇报给 ToolGuardianAgent。
+        ToolGuardianAgent 根据汇报修正工具描述或生成代码修改建议。
+
+        Args:
+            guardian_id: ToolGuardianAgent 的 agent_id
+            broker: 用于向 guardian 发送消息的 MessageBroker（可复用 connect_bus 的 broker）
+            workflow_id: 工作流 ID（可复用 connect_bus 的 workflow_id）
+        """
+        self._tool_guardian_id = guardian_id
+        self._tool_guardian_bus = broker or self._bus
+        self._guardian_workflow_id = workflow_id or self._workflow_id
+        logger.info(
+            "Agent '%s' connected to ToolGuardian '%s'",
+            self.name, guardian_id,
+        )
+
+    async def report_tool_issue(
+        self,
+        tool_name: str,
+        error_message: str,
+        call_arguments: dict[str, Any] | None = None,
+        error_traceback: str = "",
+        issue_type: str | None = None,
+        suggestion: str = "",
+    ) -> None:
+        """向 ToolGuardianAgent 汇报工具调用问题
+
+        自动分类错误类型（或由调用方显式指定 issue_type），
+        构造 ToolIssueReport 并通过消息总线发送给 ToolGuardianAgent。
+
+        错误分类规则（issue_type 为 None 时自动推断）:
+        - 包含 "not found" / "未注册" → UNCLEAR_DESCRIPTION
+        - 包含 "boundary" / "out of range" / "invalid" / "类型" / "边界" → PARAMETER_BOUNDARY
+        - 包含 "not supported" / "不支持" → MISSING_FEATURE
+        - 包含 "timeout" / "connection" / "超时" → ERROR_HANDLING
+        - 其他 → UNEXPECTED_BEHAVIOR
+
+        Args:
+            tool_name: 出问题的工具名称
+            error_message: 错误信息
+            call_arguments: 调用时的参数
+            error_traceback: 完整异常 traceback（可选）
+            issue_type: 显式指定问题类型（ToolIssueType 值），None 则自动推断
+            suggestion: 汇报者的初步修改建议
+        """
+        from youmi.mcp.protocol import ToolIssueType, ToolIssueReport
+
+        # 自动推断 issue_type
+        if issue_type is None:
+            issue_type = self._classify_tool_error(error_message)
+        elif isinstance(issue_type, str):
+            try:
+                issue_type = ToolIssueType(issue_type)
+            except ValueError:
+                issue_type = ToolIssueType.OTHER
+
+        report = ToolIssueReport(
+            reporter_agent_id=self.agent_id,
+            tool_name=tool_name,
+            issue_type=issue_type,
+            error_message=error_message,
+            call_arguments=call_arguments or {},
+            error_traceback=error_traceback,
+            suggestion=suggestion,
+        )
+
+        logger.info(
+            "Agent '%s' reporting tool issue: tool=%s type=%s error=%s",
+            self.name, tool_name, issue_type.value, error_message[:80],
+        )
+
+        # 通过消息总线发送给 ToolGuardianAgent
+        if self._tool_guardian_bus is not None and self._tool_guardian_id:
+            from youmi.bus.message import WorkflowMessage, WorkflowMessageType
+            wf_msg = WorkflowMessage(
+                workflow_id=getattr(self, '_guardian_workflow_id', self._workflow_id),
+                from_agent_id=self.agent_id,
+                to_agent_id=self._tool_guardian_id,
+                msg_type=WorkflowMessageType.FEEDBACK,
+                role=MessageRole.AGENT,
+                content=report.model_dump_json(),
+                metadata={
+                    "report_type": "tool_issue",
+                    "tool_name": tool_name,
+                    "issue_type": issue_type.value,
+                },
+            )
+            await self._tool_guardian_bus.publish(wf_msg)
+        else:
+            logger.warning(
+                "Agent '%s' cannot report tool issue: guardian not connected",
+                self.name,
+            )
+
+    @staticmethod
+    def _classify_tool_error(error_message: str) -> Any:
+        """根据错误信息自动推断工具问题类型"""
+        from youmi.mcp.protocol import ToolIssueType
+
+        msg_lower = error_message.lower()
+
+        if any(kw in msg_lower for kw in ("not found", "未注册", "未找到", "不存在")):
+            return ToolIssueType.UNCLEAR_DESCRIPTION
+
+        if any(kw in msg_lower for kw in (
+            "boundary", "out of range", "invalid", "type error",
+            "类型", "边界", "超出范围", "参数错误", "不在", "列表中",
+        )):
+            return ToolIssueType.PARAMETER_BOUNDARY
+
+        if any(kw in msg_lower for kw in ("not supported", "不支持", "未实现")):
+            return ToolIssueType.MISSING_FEATURE
+
+        if any(kw in msg_lower for kw in ("timeout", "connection", "超时", "连接")):
+            return ToolIssueType.ERROR_HANDLING
+
+        return ToolIssueType.UNEXPECTED_BEHAVIOR
+
     def connect_mcp(
         self,
         server: Any,  # MCPServer
@@ -421,7 +606,7 @@ class Agent:
         连接后:
         - Agent 通过 ToolBridge 调用工具 (权限 + MCP 路由)
         - 已注册的 ToolRegistry 工具自动迁移到 MCP Provider
-        - 内置工具（file_read/write/search 等）自动注册
+        - 内置工具按 config.tools 声明装配（无声明时全量注册）
         - _think() 和 _execute_tool_call() 自动切换为 MCP 模式
 
         Args:
@@ -440,10 +625,15 @@ class Agent:
             if handler:
                 provider.register(defn, handler)
 
-        # 注册内置工具
+        # 注册内置工具 — 按 config.tools.builtin 声明装配
         if builtin_tools:
             from youmi.tools.builtin import BuiltinToolProvider
-            bp = BuiltinToolProvider(work_dir=self._env)
+
+            # 计算排除列表（复用 register_builtin_tools 的逻辑）
+            effective_exclude = self._resolve_builtin_exclude(None)
+            bp = BuiltinToolProvider(work_dir=self._env, exclude=effective_exclude)
+
+            registered = 0
             for name, defn in bp._definitions.items():
                 if name not in provider._definitions:  # 不覆盖已有工具
                     handler = bp._handlers.get(name)
@@ -451,6 +641,12 @@ class Agent:
                         provider.register(defn, handler)
                         # 同步到 ToolRegistry
                         self._tool_registry.register(defn, handler)
+                        registered += 1
+
+            logger.debug(
+                "Agent '%s' assembled %d builtin tools via MCP (exclude=%s)",
+                self.name, registered, effective_exclude,
+            )
 
         # 注册到 MCPServer (异步操作在 initialize 或首次调用时完成)
         self._mcp_server = server
@@ -591,6 +787,275 @@ class Agent:
         )
         return result
 
+    async def chat_turn(self, message: str) -> dict[str, Any]:
+        """单轮对话 — 多轮聊天接口
+
+        与 run() 不同，chat_turn():
+        - 不改变 Agent 状态（保持 IDLE）
+        - 跨轮次保持对话历史
+        - 首次调用时自动初始化 conversation
+
+        Args:
+            message: 用户消息
+
+        Returns:
+            dict 包含:
+            - response (str): Agent 回复
+            - iterations (int): 本轮 ReAct 迭代次数
+            - tool_calls (list[str]): 本轮调用的工具名列表
+            - error (str | None): 错误信息
+        """
+        # 首次调用: 初始化 conversation 并设为 IDLE
+        if not hasattr(self, '_chat_initialized') or not self._chat_initialized:
+            if self._status == AgentStatus.CREATED:
+                await self.initialize()
+            self._conversation = []
+            if self._config.system_prompt:
+                self._conversation.append(
+                    {"role": "system", "content": self._config.system_prompt}
+                )
+            self._chat_initialized = True
+            # 确保状态为 IDLE
+            if self._status not in (AgentStatus.IDLE, AgentStatus.RUNNING):
+                self._status = AgentStatus.IDLE
+
+        # 追加用户消息
+        self._conversation.append({"role": "user", "content": message})
+        await self._memory.on_message("user", message)
+
+        response_text = ""
+        tool_calls_made: list[str] = []
+        iterations = 0
+        error_msg: str | None = None
+
+        try:
+            for i in range(self._config.max_iterations):
+                iterations += 1
+
+                observation = await self._observe()
+                thought = await self._think(observation)
+
+                # 记录工具调用
+                if thought.action_type == "tool_call":
+                    tool_name = thought.action_payload.get("name", "")
+                    tool_calls_made.append(tool_name)
+                    await self._act(thought)
+
+                reflection = await self._reflect(
+                    observation, thought,
+                    _ActionResult() if thought.action_type != "tool_call"
+                    else _ActionResult(success=True),
+                )
+
+                if reflection.is_goal_met or not thought.should_continue:
+                    response_text = thought.action_payload.get(
+                        "response", reflection.summary,
+                    )
+                    break
+            else:
+                response_text = "达到最大迭代次数，回复可能不完整。"
+
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            response_text = f"处理出错: {error_msg}"
+            logger.exception("chat_turn error: %s", error_msg)
+
+        # 记录 assistant 回复到记忆
+        if response_text:
+            await self._memory.on_message("assistant", str(response_text))
+
+        # 保持 IDLE 状态
+        self._status = AgentStatus.IDLE
+
+        return {
+            "response": str(response_text),
+            "iterations": iterations,
+            "tool_calls": tool_calls_made,
+            "error": error_msg,
+        }
+
+    async def chat_turn_stream(self, message: str):
+        """流式单轮对话 — 异步生成器
+
+        与 chat_turn() 行为一致，但以 yield 方式逐块产出文本，
+        最后 yield 一个 dict 作为完整结果。
+
+        Yields:
+            str: 文本块（LLM 流式输出的 token）
+            dict: 最终结果（最后一个 yield，包含 response/iterations/tool_calls/error）
+        """
+        # 首次调用: 初始化 conversation 并设为 IDLE
+        if not hasattr(self, '_chat_initialized') or not self._chat_initialized:
+            if self._status == AgentStatus.CREATED:
+                await self.initialize()
+            self._conversation = []
+            if self._config.system_prompt:
+                self._conversation.append(
+                    {"role": "system", "content": self._config.system_prompt}
+                )
+            self._chat_initialized = True
+            if self._status not in (AgentStatus.IDLE, AgentStatus.RUNNING):
+                self._status = AgentStatus.IDLE
+
+        # 追加用户消息
+        self._conversation.append({"role": "user", "content": message})
+        await self._memory.on_message("user", message)
+
+        response_text = ""
+        tool_calls_made: list[str] = []
+        iterations = 0
+        error_msg: str | None = None
+        _delegation_reminded = False  # 委派提醒标记（每轮仅一次）
+
+        try:
+            for i in range(self._config.max_iterations):
+                iterations += 1
+                observation = await self._observe()
+
+                # --- 流式 Think ---
+                if self._llm_client is None:
+                    # 无 LLM → 退化 echo
+                    last_user = message
+                    response_text = f"[无LLM客户端] 收到: {last_user}"
+                    yield response_text
+                    break
+
+                # 准备 tools schema
+                if self._tool_bridge is not None:
+                    tools_schema = self._tool_bridge.to_openai_tools()
+                else:
+                    tools_schema = (
+                        self._tool_registry.to_openai_tools()
+                        if self._tool_registry else None
+                    )
+
+                # 流式调用 LLM
+                chunk_text = ""
+                async for chunk in self._llm_client.chat_stream(
+                    messages=observation.messages,
+                    tools=tools_schema or None,
+                ):
+                    chunk_text += chunk
+                    yield chunk  # 逐块产出文本
+
+                # 获取完整响应
+                llm_response: LLMResponse = self._llm_client._last_stream_response
+
+                # 追加 assistant 消息到 conversation
+                assistant_msg = llm_response.raw_message
+                self._conversation.append(assistant_msg)
+
+                if llm_response.has_tool_calls:
+                    # 有工具调用 → 执行后继续循环
+                    tc = llm_response.tool_calls[0]
+                    fn_name = tc["function"]["name"]
+                    try:
+                        fn_args = json.loads(tc["function"]["arguments"])
+                    except (json.JSONDecodeError, TypeError):
+                        fn_args = {}
+
+                    tool_calls_made.append(fn_name)
+                    logger.info("Stream: LLM requests tool_call: %s(%s)", fn_name, fn_args)
+
+                    thought = _Thought(
+                        reasoning=llm_response.content,
+                        action_type="tool_call",
+                        action_payload={
+                            "tool_call_id": tc.get("id", ""),
+                            "name": fn_name,
+                            "arguments": fn_args,
+                            "all_tool_calls": llm_response.tool_calls,
+                        },
+                        should_continue=True,
+                    )
+                    await self._act(thought)
+
+                    # yield 工具调用提示
+                    yield f"\n*[🔧 调用工具: {fn_name}]*\n"
+                    continue
+                else:
+                    # 无原生 tool_calls → 尝试文本回退检测
+                    response_text = llm_response.content
+                    available_tool_names = self._tool_registry.tool_names if self._tool_registry else []
+
+                    if available_tool_names and response_text:
+                        text_tool_calls = self._parse_text_tool_calls(
+                            response_text, available_tool_names
+                        )
+                        if text_tool_calls:
+                            # 从文本中检测到工具调用 → 执行并继续循环
+                            tc = text_tool_calls[0]
+                            fn_name = tc["function"]["name"]
+                            try:
+                                fn_args = json.loads(tc["function"]["arguments"])
+                            except (json.JSONDecodeError, TypeError):
+                                fn_args = {}
+
+                            tool_calls_made.append(fn_name)
+                            logger.info(
+                                "Stream: text-fallback tool_call: %s(%s)",
+                                fn_name, fn_args,
+                            )
+
+                            thought = _Thought(
+                                reasoning=response_text,
+                                action_type="tool_call",
+                                action_payload={
+                                    "tool_call_id": tc.get("id", ""),
+                                    "name": fn_name,
+                                    "arguments": fn_args,
+                                    "all_tool_calls": text_tool_calls,
+                                },
+                                should_continue=True,
+                            )
+                            await self._act(thought)
+                            yield f"\n*[🔧 文本回退调用工具: {fn_name}]*\n"
+                            continue
+
+                    # --- 委派强制: 有工具却未调用 → 注入提醒并重试一次 ---
+                    if (
+                        available_tool_names
+                        and not tool_calls_made
+                        and not _delegation_reminded
+                        and len(response_text) > 30
+                    ):
+                        _delegation_reminded = True
+                        reminder = (
+                            "【系统提醒】你有可用的工具（"
+                            + "、".join(available_tool_names)
+                            + "）。你应该使用工具来完成任务，而不是直接回答。"
+                            "请先分析任务，再调用工具创建子Agent来执行。"
+                            "现在请使用工具。"
+                        )
+                        self._conversation.append({"role": "user", "content": reminder})
+                        logger.info("Delegation enforcement: injected reminder")
+                        yield "\n*[⚠️ 系统提醒：请使用工具委派任务]*\n"
+                        continue
+
+                    # 纯文本回复 → 完成
+                    break
+
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            if not response_text:
+                response_text = f"处理出错: {error_msg}"
+            logger.exception("chat_turn_stream error: %s", error_msg)
+
+        # 记录 assistant 回复到记忆
+        if response_text:
+            await self._memory.on_message("assistant", str(response_text))
+
+        # 保持 IDLE 状态
+        self._status = AgentStatus.IDLE
+
+        # 最终结果
+        yield {
+            "response": str(response_text),
+            "iterations": iterations,
+            "tool_calls": tool_calls_made,
+            "error": error_msg,
+        }
+
     async def destroy(self) -> None:
         """销毁 Agent — 释放资源，不可复用"""
         if self._status == AgentStatus.DESTROYED:
@@ -707,6 +1172,74 @@ class Agent:
     # ReAct 阶段 — 子类可覆写
     # -----------------------------------------------------------------------
 
+    # 文本回退: 从 LLM 纯文本中检测工具调用 (小模型不支持 function calling)
+    _TEXT_TOOL_RE = re.compile(
+        r'```(?:json)?\s*(\{[^`]*?"(?:tool_call|name)"[^`]*?\})\s*```',
+        re.DOTALL,
+    )
+
+    @classmethod
+    def _parse_text_tool_calls(cls, text: str, tool_names: list[str]) -> list[dict[str, Any]]:
+        """从 LLM 纯文本输出中检测工具调用请求
+
+        当模型不支持 function calling 时，可能以文本形式输出工具调用。
+        支持的格式:
+        1. JSON 代码块: {"tool_call": {"name": "...", "arguments": {...}}}
+        2. JSON 代码块: {"name": "...", "arguments": {...}}
+        3. 工具名匹配: tool_name({...})
+
+        Returns:
+            检测到的工具调用列表, 格式同 OpenAI tool_calls
+        """
+        results: list[dict[str, Any]] = []
+        tool_name_set = set(tool_names)
+
+        # 模式 1+2: 从 ```json ... ``` 代码块中提取
+        for m in cls._TEXT_TOOL_RE.finditer(text):
+            try:
+                data = json.loads(m.group(1))
+                # 提取 name 和 arguments
+                if "tool_call" in data:
+                    data = data["tool_call"]
+                fn_name = data.get("name", "")
+                fn_args = data.get("arguments", {})
+                if fn_name and fn_name in tool_name_set:
+                    if isinstance(fn_args, str):
+                        fn_args = json.loads(fn_args)
+                    results.append({
+                        "id": f"call_text_{fn_name}",
+                        "type": "function",
+                        "function": {
+                            "name": fn_name,
+                            "arguments": json.dumps(fn_args, ensure_ascii=False),
+                        },
+                    })
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # 模式 3: tool_name({...}) 函数调用
+        if not results:
+            fn_re = re.compile(
+                r'(' + '|'.join(re.escape(n) for n in tool_names) + r')\s*\(\s*(\{[^)]*\})\s*\)',
+                re.DOTALL,
+            )
+            for m in fn_re.finditer(text):
+                try:
+                    fn_name = m.group(1)
+                    fn_args = json.loads(m.group(2))
+                    results.append({
+                        "id": f"call_text_{fn_name}",
+                        "type": "function",
+                        "function": {
+                            "name": fn_name,
+                            "arguments": json.dumps(fn_args, ensure_ascii=False),
+                        },
+                    })
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        return results
+
     async def _observe(self) -> _Observation:
         """Observe: 收集当前上下文
 
@@ -776,6 +1309,32 @@ class Agent:
                 should_continue=True,
             )
 
+        # 无原生 tool_calls → 尝试文本回退检测
+        available_tool_names = self._tool_registry.tool_names if self._tool_registry else []
+        if available_tool_names and response.content:
+            text_tool_calls = self._parse_text_tool_calls(
+                response.content, available_tool_names
+            )
+            if text_tool_calls:
+                tc = text_tool_calls[0]
+                fn_name = tc["function"]["name"]
+                try:
+                    fn_args = json.loads(tc["function"]["arguments"])
+                except (json.JSONDecodeError, TypeError):
+                    fn_args = {}
+                logger.info("Text-fallback tool_call: %s(%s)", fn_name, fn_args)
+                return _Thought(
+                    reasoning=response.content,
+                    action_type="tool_call",
+                    action_payload={
+                        "tool_call_id": tc.get("id", ""),
+                        "name": fn_name,
+                        "arguments": fn_args,
+                        "all_tool_calls": text_tool_calls,
+                    },
+                    should_continue=True,
+                )
+
         # 纯文本回复
         return _Thought(
             reasoning=response.content,
@@ -843,11 +1402,14 @@ class Agent:
         优先通过 MCP ToolBridge (权限 + 路由)，
         退化到 ToolRegistry 直接执行。
 
+        失败时自动向 ToolGuardianAgent 汇报（如果已连接）。
+
         流程:
         1. 从 payload 提取工具名和参数
         2. 通过 ToolBridge 或 ToolRegistry 执行
         3. 将结果以 tool role 消息追加到 conversation
         4. 同步写入记忆系统
+        5. 失败时自动汇报给 ToolGuardianAgent
         """
         name = payload.get("name", "")
         arguments = payload.get("arguments", {})
@@ -867,6 +1429,10 @@ class Agent:
             })
 
             if not success:
+                # 自动汇报给 ToolGuardianAgent
+                await self._auto_report_tool_error(
+                    name, result_str, arguments,
+                )
                 return _ActionResult(success=False, error=result_str)
 
             await self._memory.on_message("tool", result_str, tool_name=name)
@@ -881,6 +1447,7 @@ class Agent:
                 "tool_call_id": tool_call_id,
                 "content": json.dumps({"error": error_msg}),
             })
+            await self._auto_report_tool_error(name, error_msg, arguments)
             return _ActionResult(success=False, error=error_msg)
 
         try:
@@ -898,13 +1465,40 @@ class Agent:
             return _ActionResult(success=True, output=result_str)
         except Exception as exc:
             error_msg = f"工具 '{name}' 执行失败: {exc}"
+            tb_str = _traceback_mod.format_exc()
             self._conversation.append({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": json.dumps({"error": error_msg}),
             })
             logger.warning(error_msg)
+            await self._auto_report_tool_error(
+                name, error_msg, arguments, error_traceback=tb_str,
+            )
             return _ActionResult(success=False, error=error_msg)
+
+    async def _auto_report_tool_error(
+        self,
+        tool_name: str,
+        error_message: str,
+        arguments: dict[str, Any],
+        error_traceback: str = "",
+    ) -> None:
+        """工具调用失败时的自动汇报（内部方法）
+
+        仅在已连接 ToolGuardianAgent 时生效，静默失败不影响主流程。
+        """
+        if not self._tool_guardian_id:
+            return
+        try:
+            await self.report_tool_issue(
+                tool_name=tool_name,
+                error_message=error_message,
+                call_arguments=arguments,
+                error_traceback=error_traceback,
+            )
+        except Exception:
+            logger.debug("Failed to auto-report tool error (non-critical)", exc_info=True)
 
     async def _execute_skill_call(self, payload: dict[str, Any]) -> _ActionResult:
         """执行技能调用 — 由 SkillLoader 注入实际实现"""

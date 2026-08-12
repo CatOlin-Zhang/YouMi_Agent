@@ -248,6 +248,58 @@ class MCPServer:
                 schemas.append(defn.to_openai_function_schema())
         return schemas
 
+    def update_tool_description(
+        self,
+        tool_name: str,
+        description: str | None = None,
+        param_descriptions: dict[str, str] | None = None,
+    ) -> bool:
+        """更新指定工具的描述信息
+
+        根据 tool_route 路由到对应的 Provider，委托其更新工具描述。
+        仅 LocalFunctionProvider 支持此操作。
+
+        Args:
+            tool_name: 工具名称
+            description: 新的工具描述，None 表示不修改
+            param_descriptions: 参数描述更新 {参数名: 新描述}
+
+        Returns:
+            True 表示更新成功，False 表示工具不存在或 Provider 不支持
+        """
+        provider_id = self._tool_route.get(tool_name)
+        if provider_id is None:
+            logger.warning("update_tool_description: tool '%s' not found in route", tool_name)
+            return False
+
+        provider = self._providers.get(provider_id)
+        if provider is None:
+            return False
+
+        # 仅 LocalFunctionProvider 支持 update_tool_description
+        updater = getattr(provider, "update_tool_description", None)
+        if updater is None:
+            logger.warning("Provider '%s' does not support update_tool_description", provider_id)
+            return False
+
+        return updater(tool_name, description=description, param_descriptions=param_descriptions)
+
+    def get_tool_definition(self, tool_name: str) -> Any | None:
+        """获取工具的当前定义（供 ToolGuardianAgent 读取）"""
+        provider_id = self._tool_route.get(tool_name)
+        if provider_id is None:
+            return None
+
+        provider = self._providers.get(provider_id)
+        if provider is None:
+            return None
+
+        getter = getattr(provider, "get_tool_definition", None)
+        if getter is None:
+            return None
+
+        return getter(tool_name)
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------

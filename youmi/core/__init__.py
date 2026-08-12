@@ -12,6 +12,9 @@ from youmi.core.types import (
     AgentMetadata,
     AgentMessage,
     MessageRole,
+    ToolsConfig,
+    BuiltinToolsConfig,
+    CustomToolRef,
 )
 
 __all__ = [
@@ -30,4 +33,7 @@ __all__ = [
     "AgentMetadata",
     "AgentMessage",
     "MessageRole",
+    "ToolsConfig",
+    "BuiltinToolsConfig",
+    "CustomToolRef",
 ]

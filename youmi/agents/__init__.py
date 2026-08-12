@@ -7,6 +7,8 @@ Agent 配置目录模块
     ├── __init__.py
     ├── master/                 # MasterAgent 配置
     │   └── config.yaml
+    ├── tool_guardian/          # ToolGuardianAgent 配置
+    │   └── config.yaml
     ├── coder/                  # 示例：Coder Agent 配置
     │   └── config.yaml
     └── ...                     # 其他 Agent

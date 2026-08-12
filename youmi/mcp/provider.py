@@ -142,6 +142,51 @@ class LocalFunctionProvider(ToolProvider):
         self._definitions.pop(name, None)
         self._handlers.pop(name, None)
 
+    def update_tool_description(
+        self,
+        name: str,
+        description: str | None = None,
+        param_descriptions: dict[str, str] | None = None,
+    ) -> bool:
+        """更新工具的描述信息（不影响执行函数）
+
+        由 ToolGuardianAgent 调用，根据收集到的问题汇报修正工具说明。
+
+        Args:
+            name: 工具名称
+            description: 新的工具描述，None 表示不修改
+            param_descriptions: 参数描述更新 {参数名: 新描述}，None 表示不修改
+
+        Returns:
+            True 表示更新成功，False 表示工具不存在
+        """
+        defn = self._definitions.get(name)
+        if defn is None:
+            logger.warning("update_tool_description: tool '%s' not found in provider '%s'",
+                           name, self._provider_id)
+            return False
+
+        updated_fields: dict[str, Any] = {}
+        if description is not None:
+            updated_fields["description"] = description
+
+        if param_descriptions:
+            updated_params = list(defn.parameters)
+            for param in updated_params:
+                if param.name in param_descriptions:
+                    param.description = param_descriptions[param.name]
+            updated_fields["parameters"] = updated_params
+
+        if updated_fields:
+            self._definitions[name] = defn.model_copy(update=updated_fields)
+            logger.info("Provider '%s': updated tool '%s' description", self._provider_id, name)
+
+        return True
+
+    def get_tool_definition(self, name: str) -> ToolDefinition | None:
+        """获取工具定义（供外部读取当前描述）"""
+        return self._definitions.get(name)
+
     async def get_tools(self) -> list[MCPToolInfo]:
         tools: list[MCPToolInfo] = []
         for defn in self._definitions.values():

@@ -12,6 +12,8 @@ from youmi.mcp.protocol import (
     MCP_ERROR_TOOL_NOT_FOUND,
     MCP_ERROR_PROVIDER_ERROR,
     MCP_ERROR_PERMISSION_DENIED,
+    ToolIssueType,
+    ToolIssueReport,
 )
 from youmi.mcp.provider import ToolProvider, LocalFunctionProvider
 from youmi.mcp.server import MCPServer
@@ -30,6 +32,8 @@ __all__ = [
     "MCP_ERROR_TOOL_NOT_FOUND",
     "MCP_ERROR_PROVIDER_ERROR",
     "MCP_ERROR_PERMISSION_DENIED",
+    "ToolIssueType",
+    "ToolIssueReport",
     "ToolProvider",
     "LocalFunctionProvider",
     "MCPServer",

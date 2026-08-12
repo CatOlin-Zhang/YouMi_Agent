@@ -15,20 +15,17 @@ MasterAgent — 主协调 Agent
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from youmi.core.agent import Agent, AgentConfig, AgentStatus, TaskResult
-from youmi.core.tool import ToolDefinition, ToolParameter, ToolRegistry
 from youmi.core.types import (
     AgentMessage,
     AgentMetadata,
     LLMConfig,
     MemoryConfig,
 )
-from youmi.agents import get_agent_dir, list_agents, load_agent_config
+from youmi.agents import load_agent_config
 from youmi.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -198,6 +195,18 @@ class MasterAgent(Agent):
             )
         except FileNotFoundError:
             # 没有配置文件，使用参数构造
+            # 自动生成详细的系统提示词（基于 role + task）
+            if not system_prompt:
+                system_prompt = (
+                    f"你是一个专业的 {role} Agent。\n"
+                    f"你的具体任务：{task}\n\n"
+                    f"要求：\n"
+                    f"- 始终围绕上述任务进行回复和工作\n"
+                    f"- 以 {role} 的专业视角分析和输出\n"
+                    f"- 回复要有条理、具体、可执行\n"
+                    f"- 用中文简洁回复"
+                )
+
             sub_config = AgentConfig(
                 name=agent_name,
                 system_prompt=system_prompt or f"你是一个 {role} 角色的 Agent。",
@@ -317,124 +326,13 @@ class MasterAgent(Agent):
     # -----------------------------------------------------------------------
 
     def _register_master_tools(self) -> None:
-        """注册 MasterAgent 专用工具"""
+        """注册 MasterAgent 专用工具
 
-        # 工具: create_sub_agent
-        create_tool = ToolDefinition(
-            name="create_sub_agent",
-            description=(
-                "创建一个新的子 Agent 来执行特定任务。"
-                "指定角色（如 coder、reviewer、researcher）和任务描述。"
-            ),
-            parameters=[
-                ToolParameter(
-                    name="role",
-                    type="string",
-                    description="Agent 角色标识，如 coder/reviewer/researcher/writer",
-                    required=True,
-                ),
-                ToolParameter(
-                    name="task",
-                    type="string",
-                    description="分配给子 Agent 的具体任务描述",
-                    required=True,
-                ),
-                ToolParameter(
-                    name="system_prompt",
-                    type="string",
-                    description="自定义系统提示词（可选）",
-                    required=False,
-                    default="",
-                ),
-                ToolParameter(
-                    name="allowed_tools",
-                    type="array",
-                    description="允许使用的工具名称列表（可选）",
-                    required=False,
-                ),
-            ],
-        )
-
-        async def _create_sub_agent_handler(**kwargs: Any) -> str:
-            role = kwargs.get("role", "general")
-            task = kwargs.get("task", "")
-            system_prompt = kwargs.get("system_prompt", "")
-            allowed_tools = kwargs.get("allowed_tools", [])
-
-            agent = self.create_sub_agent(
-                role=role,
-                task=task,
-                system_prompt=system_prompt,
-                allowed_tools=allowed_tools or None,
-            )
-            return json.dumps({
-                "agent_id": agent.agent_id,
-                "name": agent.name,
-                "role": role,
-                "task": task,
-                "status": "created",
-            }, ensure_ascii=False)
-
-        self._tool_registry.register(create_tool, _create_sub_agent_handler)
-
-        # 工具: run_sub_agent
-        run_tool = ToolDefinition(
-            name="run_sub_agent",
-            description="运行指定的子 Agent，让其执行已分配的任务。",
-            parameters=[
-                ToolParameter(
-                    name="agent_id",
-                    type="string",
-                    description="要运行的子 Agent ID",
-                    required=True,
-                ),
-            ],
-        )
-
-        async def _run_sub_agent_handler(**kwargs: Any) -> str:
-            agent_id = kwargs.get("agent_id", "")
-            try:
-                result = await self.run_sub_agent(agent_id)
-                return json.dumps({
-                    "agent_id": agent_id,
-                    "status": result.status.value,
-                    "output": result.output,
-                    "iterations": result.iterations,
-                    "error": result.error,
-                }, ensure_ascii=False)
-            except KeyError as e:
-                return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-        self._tool_registry.register(run_tool, _run_sub_agent_handler)
-
-        # 工具: list_sub_agents
-        list_tool = ToolDefinition(
-            name="list_sub_agents",
-            description="列出所有已创建的子 Agent 及其状态。",
-            parameters=[],
-        )
-
-        async def _list_sub_agents_handler(**kwargs: Any) -> str:
-            agents_info = [rec.to_dict() for rec in self._sub_agents.values()]
-            return json.dumps(agents_info, ensure_ascii=False)
-
-        self._tool_registry.register(list_tool, _list_sub_agents_handler)
-
-        # 工具: list_available_roles
-        roles_tool = ToolDefinition(
-            name="list_available_roles",
-            description="列出所有已配置的 Agent 角色（在 youmi/agents/ 目录中有配置的）。",
-            parameters=[],
-        )
-
-        async def _list_available_roles_handler(**kwargs: Any) -> str:
-            roles = list_agents()
-            return json.dumps({
-                "available_roles": roles,
-                "description": "这些角色在 youmi/agents/ 中有配置文件，可以直接创建",
-            }, ensure_ascii=False)
-
-        self._tool_registry.register(roles_tool, _list_available_roles_handler)
+        委托给 youmi.tools.coordinator_ops 层实现，
+        工具代码统一存放在 tools/ 目录下。
+        """
+        from youmi.tools.coordinator_ops import register_coordinator_tools
+        register_coordinator_tools(self)
 
     # -----------------------------------------------------------------------
     # 生命周期钩子

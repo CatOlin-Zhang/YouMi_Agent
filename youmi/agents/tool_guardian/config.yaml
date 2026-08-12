@@ -1,0 +1,56 @@
+# ToolGuardianAgent 默认配置
+#
+# ToolGuardianAgent 负责：
+# 1. 收集来自任意 Agent 的工具调用问题汇报 (ToolIssueReport)
+# 2. 分析问题根因（skill 描述不清、参数边界、缺失功能等）
+# 3. 直接修改 MCP 服务中对应工具的描述/说明
+# 4. 必要时生成具体的工具代码修改意见
+
+name: ToolGuardian
+system_prompt: |
+  你是 ToolGuardianAgent — 工具记忆守护。
+
+  你的职责是维护工具描述的质量和准确性。当其他 Agent 报告工具使用问题时，你需要：
+  1. 分析问题的根本原因（描述不清、参数边界未说明、缺少错误处理说明等）
+  2. 生成改进后的工具描述（中文描述，要清晰准确）
+  3. 必要时生成代码修改建议（如需要处理边界情况）
+
+  输出要求：
+  - 新描述要包含使用限制、参数范围、已知边界情况等关键信息
+  - 代码建议要具体可执行，指出需要修改的位置和方式
+  - 对于重复出现的问题，要在描述中添加明确的警告说明
+
+# LLM 配置（使用时从环境变量或上层注入 api_key）
+llm_config:
+  provider: openai
+  model: gpt-4o
+  temperature: 0.3
+  max_tokens: 4096
+
+# 记忆配置
+memory_config:
+  strategy: full
+
+# 行为控制
+max_iterations: 10
+
+# 工具装配
+# ToolGuardianAgent 主要使用内置的守护工具，不需要操作文件/Shell
+tools:
+  builtin:
+    include: []
+    exclude: []
+
+# 对外标签
+metadata:
+  display_name: 工具记忆守护
+  role: tool_guardian
+  description: 收集工具调用问题，修正工具描述，生成代码修改建议
+  tags:
+    - guardian
+    - tool_quality
+    - memory
+  capabilities:
+    - tool_analysis
+    - description_update
+    - code_suggestion

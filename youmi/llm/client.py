@@ -202,6 +202,107 @@ class LLMClient:
         return LLMResponse(data)
 
     # ------------------------------------------------------------------
+    # 流式调用
+    # ------------------------------------------------------------------
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        **extra_params: Any,
+    ) -> Any:
+        """流式调用 Chat Completions API (SSE)
+
+        异步生成器，逐块产出文本内容。完成后通过 .final_response 获取完整响应。
+
+        Yields:
+            str: 文本块（仅 content delta，不含 tool_calls）
+        """
+        payload: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": messages,
+            "temperature": self._config.temperature,
+            "max_tokens": self._config.max_tokens,
+            "stream": True,
+        }
+
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+            else:
+                payload["tool_choice"] = "auto"
+
+        payload.update(self._config.extra_params)
+        payload.update(extra_params)
+
+        logger.debug("LLM stream request: model=%s messages=%d tools=%d",
+                      self._config.model, len(messages), len(tools or []))
+
+        collected_content: list[str] = []
+        collected_tool_calls: dict[int, dict[str, Any]] = {}
+        finish_reason = ""
+
+        async with self._client.stream("POST", "/chat/completions", json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                fr = chunk.get("choices", [{}])[0].get("finish_reason")
+                if fr:
+                    finish_reason = fr
+
+                # 文本内容
+                content = delta.get("content", "")
+                if content:
+                    collected_content.append(content)
+                    yield content
+
+                # 工具调用（累积 delta）
+                for tc_delta in delta.get("tool_calls", []):
+                    idx = tc_delta["index"]
+                    if idx not in collected_tool_calls:
+                        collected_tool_calls[idx] = {
+                            "id": tc_delta.get("id", ""),
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    existing = collected_tool_calls[idx]
+                    fn = tc_delta.get("function", {})
+                    if fn.get("name"):
+                        existing["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        existing["function"]["arguments"] += fn["arguments"]
+                    if tc_delta.get("id"):
+                        existing["id"] = tc_delta["id"]
+
+        # 构建完整响应
+        full_content = "".join(collected_content)
+        tool_calls_list = [
+            collected_tool_calls[k] for k in sorted(collected_tool_calls)
+        ] if collected_tool_calls else []
+
+        raw = {
+            "choices": [{"message": {"role": "assistant", "content": full_content},
+                         "finish_reason": finish_reason}],
+            "usage": {},
+        }
+        if tool_calls_list:
+            raw["choices"][0]["message"]["tool_calls"] = tool_calls_list
+
+        self._last_stream_response = LLMResponse(raw)
+
+    # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
 

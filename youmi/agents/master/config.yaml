@@ -39,6 +39,19 @@ memory_config:
 # 行为控制
 max_iterations: 30
 
+# 工具装配
+# MasterAgent 作为协调者，只需少量工具；子 Agent 按角色配置更多工具
+tools:
+  builtin:
+    # 白名单模式：只注册以下工具（MasterAgent 不直接操作文件/Shell）
+    include:
+      - get_datetime        # 时间戳，用于任务记录
+      - json_tool           # JSON 处理，用于结果解析
+    # 黑名单模式示例（注释掉，二选一）：
+    # exclude:
+    #   - shell_exec
+    #   - web_fetch
+
 # 对外标签
 metadata:
   display_name: Master Agent

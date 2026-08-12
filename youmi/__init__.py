@@ -11,8 +11,11 @@ from youmi.mcp import (
     ToolBridge,
     ToolProvider,
     LocalFunctionProvider,
+    ToolIssueType,
+    ToolIssueReport,
 )
 from youmi.coordinator.master import MasterAgent
+from youmi.coordinator.tool_guardian import ToolGuardianAgent, ToolModification
 from youmi.bus import (
     WorkflowMessage,
     WorkflowMessageType,
@@ -40,8 +43,12 @@ __all__ = [
     "ToolBridge",
     "ToolProvider",
     "LocalFunctionProvider",
+    "ToolIssueType",
+    "ToolIssueReport",
     # Coordinator
     "MasterAgent",
+    "ToolGuardianAgent",
+    "ToolModification",
     # Message Bus
     "WorkflowMessage",
     "WorkflowMessageType",

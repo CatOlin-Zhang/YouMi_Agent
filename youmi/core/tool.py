@@ -54,6 +54,7 @@ class ToolParameter(BaseModel):
     required: bool = True
     enum: list[str] | None = None
     default: Any = None
+    items: dict[str, Any] | None = None  # array 类型的元素 schema
 
 
 class ToolDefinition(BaseModel):
@@ -80,6 +81,8 @@ class ToolDefinition(BaseModel):
             }
             if param.enum:
                 prop["enum"] = param.enum
+            if param.items is not None:
+                prop["items"] = param.items
             properties[param.name] = prop
             if param.required:
                 required.append(param.name)
