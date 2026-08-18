@@ -16,6 +16,11 @@ from youmi.mcp import (
 )
 from youmi.coordinator.master import MasterAgent
 from youmi.coordinator.tool_guardian import ToolGuardianAgent, ToolModification
+from youmi.coordinator.plan import (
+    WorkflowPlan, WorkflowStep, WorkflowExecutor, StepResult, StepStatus,
+)
+from youmi.coordinator.handoff import HandoffProtocol
+from youmi.scheduler import HeartbeatScheduler, ScheduledTask
 from youmi.bus import (
     WorkflowMessage,
     WorkflowMessageType,
@@ -49,6 +54,17 @@ __all__ = [
     "MasterAgent",
     "ToolGuardianAgent",
     "ToolModification",
+    # P1: WorkflowPlan + Executor
+    "WorkflowPlan",
+    "WorkflowStep",
+    "WorkflowExecutor",
+    "StepResult",
+    "StepStatus",
+    # P1: Handoff
+    "HandoffProtocol",
+    # P1: Scheduler
+    "HeartbeatScheduler",
+    "ScheduledTask",
     # Message Bus
     "WorkflowMessage",
     "WorkflowMessageType",

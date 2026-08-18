@@ -51,6 +51,13 @@ class LLMConfig(BaseModel):
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_params: dict[str, Any] = Field(default_factory=dict)
 
+    # 上下文窗口预算 (P0: Compaction)
+    max_context_tokens: int = Field(
+        default=8000, gt=0,
+        description="上下文 token 预算。Compactor 据此决定何时触发压缩。"
+                    "设为模型实际 context window 的 80% 较安全。",
+    )
+
     model_config = {"frozen": True}
 
 
@@ -88,6 +95,66 @@ class LongTermMemoryConfig(BaseModel):
     collection_name: str | None = Field(default=None, description="向量集合名称，默认按 agent_id 自动生成")
 
 
+# ---------------------------------------------------------------------------
+# 上下文压缩配置 (P0: Compaction)
+# ---------------------------------------------------------------------------
+
+class CompactionConfig(BaseModel):
+    """上下文压缩配置
+
+    参考 OpenClaw compaction 机制，控制 Agent 在对话过长时自动压缩上下文。
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用自动上下文压缩",
+    )
+    reserve_ratio: float = Field(
+        default=0.8, ge=0.1, le=1.0,
+        description="触发压缩的阈值比例。当已用 token 达到 max_context_tokens * ratio 时触发。",
+    )
+    keep_recent: int = Field(
+        default=10, gt=0,
+        description="压缩时保留的最近消息条数 (不参与压缩)",
+    )
+
+    model_config = {"frozen": True}
+
+
+# ---------------------------------------------------------------------------
+# Session 持久化配置 (P0: Persistence)
+# ---------------------------------------------------------------------------
+
+class SessionPersistenceConfig(BaseModel):
+    """Session 持久化配置
+
+    参考 OpenClaw SQLite session transcript，控制 Agent 对话的跨重启持久化。
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用 session 持久化",
+    )
+    backend: str = Field(
+        default="sqlite",
+        description="持久化后端类型: 'sqlite' 或 'file'",
+    )
+    db_path: str = Field(
+        default=".youmi_sessions.db",
+        description="SQLite 数据库文件路径 (backend='sqlite' 时使用)",
+    )
+    base_dir: str = Field(
+        default=".youmi_sessions",
+        description="JSON 文件存储根目录 (backend='file' 时使用)",
+    )
+    auto_restore: bool = Field(
+        default=True,
+        description="Agent 初始化时是否自动恢复最近的 session",
+    )
+
+    model_config = {"frozen": True}
+
+
 class MemoryConfig(BaseModel):
     """Agent 记忆系统总配置
 
@@ -106,6 +173,18 @@ class MemoryConfig(BaseModel):
     strategy_config: dict[str, Any] = Field(
         default_factory=dict,
         description="传给策略的配置参数 (如 buffer_size, keywords 等)",
+    )
+
+    # 上下文压缩 (P0)
+    compaction: CompactionConfig = Field(
+        default_factory=CompactionConfig,
+        description="上下文压缩配置",
+    )
+
+    # Session 持久化 (P0)
+    persistence: SessionPersistenceConfig = Field(
+        default_factory=SessionPersistenceConfig,
+        description="Session 持久化配置",
     )
 
     # 后端模式 (旧版兼容)
@@ -257,6 +336,72 @@ class ToolsConfig(BaseModel):
             and not self.builtin.exclude
             and not self.custom
         )
+
+
+# ---------------------------------------------------------------------------
+# Handoff / 任务委派配置 (P1: OC-4)
+# ---------------------------------------------------------------------------
+
+class HandoffRule(BaseModel):
+    """任务委派规则
+
+    定义 Agent 在何种条件下将任务委派给其他 Agent。
+    参考 OpenClaw 的 SOUL.md ## Handoffs 声明式委派。
+
+    Args:
+        name: 规则名称 (日志/标识用)
+        target_agent_id: 目标 Agent ID (接收委任务的 Agent)
+        trigger_keywords: 触发关键词列表 (用户消息中包含任一关键词时触发)
+        trigger_description: 触发描述 (LLM 根据此描述判断是否委派)
+        message_template: 委派消息模板 ({task} 会被替换为实际任务内容)
+        max_depth: 最大委派链深度 (防止循环委派)
+        enabled: 是否启用
+    """
+
+    name: str = Field(description="规则名称")
+    target_agent_id: str = Field(description="目标 Agent ID")
+    trigger_keywords: list[str] = Field(
+        default_factory=list,
+        description="触发关键词列表",
+    )
+    trigger_description: str = Field(
+        default="",
+        description="LLM 判断是否委派的描述文本",
+    )
+    message_template: str = Field(
+        default="请将以下任务完成:\n{task}",
+        description="委派消息模板",
+    )
+    max_depth: int = Field(
+        default=3, ge=1, le=10,
+        description="最大委派链深度",
+    )
+    enabled: bool = Field(default=True)
+
+    model_config = {"frozen": True}
+
+
+class HandoffConfig(BaseModel):
+    """Handoff 总配置"""
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用 Agent 间任务委派",
+    )
+    rules: list[HandoffRule] = Field(
+        default_factory=list,
+        description="委派规则列表",
+    )
+    default_max_depth: int = Field(
+        default=3, ge=1, le=10,
+        description="默认最大委派链深度",
+    )
+    timeout_seconds: float = Field(
+        default=120, gt=0,
+        description="等待委派结果的超时秒数",
+    )
+
+    model_config = {"frozen": True}
 
 
 # ---------------------------------------------------------------------------

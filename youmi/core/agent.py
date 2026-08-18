@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 from youmi.core.types import (
     AgentMessage,
     AgentMetadata,
+    HandoffConfig,
+    HandoffRule,
     LLMConfig,
     MemoryConfig,
     MessageRole,
@@ -124,6 +126,12 @@ class AgentConfig(BaseModel):
     tools: ToolsConfig = Field(
         default_factory=ToolsConfig,
         description="工具装配配置：声明 Agent 需要注册哪些工具",
+    )
+
+    # Handoff / 任务委派 (P1: OC-4)
+    handoff: HandoffConfig = Field(
+        default_factory=HandoffConfig,
+        description="Agent 间任务委派配置",
     )
 
     # 对外标签
@@ -255,14 +263,29 @@ class Agent:
         strategy = memory_strategy or config.memory_config.strategy
         strategy_config = config.memory_config.strategy_config or None
 
+        # Session 持久化后端初始化 (P0: Persistence)
+        persistence_backend = self._create_persistence_backend(
+            config.memory_config.persistence,
+        )
+
         self._memory = MemoryManager(
             agent_id=config.agent_id,
             strategy=strategy,
             config=strategy_config,
             llm_call=llm_call,
+            persistence_backend=persistence_backend,
         )
         # 保留旧版 MemoryAdapter 引用 (兼容)
         self._legacy_memory = MemoryAdapter(agent_id=config.agent_id)
+
+        # 上下文压缩器初始化 (P0: Compaction)
+        from youmi.memory.compaction import ContextCompactor
+        self._compactor = ContextCompactor(
+            max_context_tokens=config.llm_config.max_context_tokens,
+            reserve_ratio=config.memory_config.compaction.reserve_ratio,
+            keep_recent=config.memory_config.compaction.keep_recent,
+            llm_call=llm_call,
+        ) if config.memory_config.compaction.enabled else None
 
         self._message_queue: asyncio.Queue[AgentMessage] = asyncio.Queue()
         self._iteration_count: int = 0
@@ -351,6 +374,14 @@ class Agent:
         """
         return self._env
 
+    @property
+    def compactor(self) -> Any:
+        """上下文压缩器 (ContextCompactor | None)
+
+        P0: Compaction。启用后在 _observe() 中自动压缩过长的上下文。
+        """
+        return getattr(self, '_compactor', None)
+
     @staticmethod
     def _detect_project_root() -> str:
         """自动检测项目根目录
@@ -364,6 +395,49 @@ class Agent:
             if any((parent / m).exists() for m in markers):
                 return str(parent)
         return str(current)
+
+    @staticmethod
+    def _create_persistence_backend(persistence_cfg: Any) -> Any:
+        """根据配置创建持久化后端
+
+        Args:
+            persistence_cfg: SessionPersistenceConfig 实例
+
+        Returns:
+            PersistenceBackend 实例，或 None (未启用时)
+        """
+        if not persistence_cfg.enabled:
+            return None
+
+        if persistence_cfg.backend == "sqlite":
+            from youmi.memory.backends.sqlite_backend import SQLiteBackend
+            return SQLiteBackend(db_path=persistence_cfg.db_path)
+        elif persistence_cfg.backend == "file":
+            from youmi.memory.backends.file_backend import FileBackend
+            return FileBackend(base_dir=persistence_cfg.base_dir)
+        else:
+            logger.warning(
+                "Unknown persistence backend '%s', persistence disabled.",
+                persistence_cfg.backend,
+            )
+            return None
+
+    def _make_llm_call_fn(self) -> Any:
+        """创建 llm_call 函数包装器，供 Compactor / Summary 策略使用
+
+        Returns:
+            async def(messages) -> str 函数，无 LLM 客户端时返回 None
+        """
+        if self._llm_client is None:
+            return None
+
+        client = self._llm_client
+
+        async def llm_call(messages: list[dict[str, str]]) -> str:
+            response = await client.chat(messages=messages)
+            return response.content or ""
+
+        return llm_call
 
     def register_tool(self, func: Any, **kwargs: Any) -> None:
         """快捷注册工具函数
@@ -678,10 +752,20 @@ class Agent:
         """初始化 Agent — 创建后必须调用一次
 
         触发 on_initialize 钩子，子类在此装载 Skill/Tool。
-        同时初始化记忆策略。如果已 connect_mcp，注册 Provider 到 Server。
+        同时初始化记忆策略和持久化后端。如果已 connect_mcp，注册 Provider 到 Server。
         """
         self._ensure_status(AgentStatus.CREATED, "initialize")
         await self._memory.initialize()
+
+        # Session 自动恢复 (P0: Persistence)
+        persistence_cfg = self._config.memory_config.persistence
+        if persistence_cfg.enabled and persistence_cfg.auto_restore:
+            restored = await self._memory.restore_session()
+            if restored:
+                logger.info(
+                    "Agent '%s' restored session '%s' (%d messages)",
+                    self.name, self._memory.current_session_id, len(restored),
+                )
 
         # 注册 MCP Provider (如果 connect_mcp 已调用)
         pending = getattr(self, '_mcp_pending_provider', None)
@@ -690,10 +774,18 @@ class Agent:
             self._mcp_pending_provider = None
 
         await self.on_initialize()
+
+        # Compactor 的 llm_call 可以在 on_initialize 之后设置
+        # (因为子类可能在此创建 LLM 客户端)
+        if self._compactor is not None and self._compactor._llm_call is None and self._llm_client is not None:
+            self._compactor._llm_call = self._make_llm_call_fn()
+
         self._status = AgentStatus.IDLE
-        logger.info("Agent '%s' [%s] initialized (memory=%s, mcp=%s).",
+        logger.info("Agent '%s' [%s] initialized (memory=%s, mcp=%s, compaction=%s, persistence=%s).",
                      self.name, self.agent_id, self._memory.strategy_name,
-                     'yes' if self._tool_bridge else 'no')
+                     'yes' if self._tool_bridge else 'no',
+                     'yes' if self._compactor else 'no',
+                     'yes' if self._memory.persistence else 'no')
 
     async def run(self, task: str, task_id: str = "") -> TaskResult:
         """执行任务 — 核心 ReAct 循环
@@ -711,6 +803,10 @@ class Agent:
         self._task_start_time = datetime.utcnow()
 
         await self.on_start(task)
+
+        # 启动新 session (P0: Persistence)
+        if self._memory.persistence is not None:
+            self._memory.start_session()
 
         # 构建初始 conversation
         self._conversation = []
@@ -1244,9 +1340,16 @@ class Agent:
         """Observe: 收集当前上下文
 
         默认实现: 返回 self._conversation 列表 (含 system/user/assistant/tool 消息)。
+        集成 Compactor: 在返回前检查并按需压缩上下文 (P0: Compaction)。
         子类可扩展: 注入额外记忆、环境信息等。
         """
-        return _Observation(messages=list(self._conversation))
+        conversation = list(self._conversation)
+
+        # Compaction: 检查并按需压缩上下文
+        if self._compactor is not None:
+            conversation = await self._compactor.maybe_compact(conversation)
+
+        return _Observation(messages=conversation)
 
     async def _think(self, observation: _Observation) -> _Thought:
         """Think: 调用 LLM 推理，自动处理 tool_calls
@@ -1508,10 +1611,97 @@ class Agent:
         )
 
     async def _execute_delegation(self, payload: dict[str, Any]) -> _ActionResult:
-        """委托子任务给其他 Agent — 由 Coordinator 注入实际实现"""
+        """委托子任务给其他 Agent (P1: Handoff)
+
+        payload 包含:
+        - target_agent_id: 目标 Agent ID
+        - task: 任务描述
+        - message_template: 消息模板 (可选)
+        - depth: 当前委派深度 (内部跟踪)
+
+        流程:
+        1. 根据 handoff_rules 匹配目标 Agent
+        2. 通过消息总线发送 task 消息
+        3. 等待 feedback 回复
+        4. 返回委派结果
+        """
+        target_agent_id = payload.get("target_agent_id", "")
+        task = payload.get("task", "")
+        depth = payload.get("depth", 0)
+
+        if not target_agent_id:
+            return _ActionResult(
+                success=False,
+                error="delegation 未指定 target_agent_id",
+            )
+
+        # 检查委派深度限制
+        handoff_cfg = self._config.handoff
+        max_depth = handoff_cfg.default_max_depth
+        # 查找匹配规则中的 max_depth
+        for rule in handoff_cfg.rules:
+            if rule.target_agent_id == target_agent_id and rule.enabled:
+                max_depth = min(max_depth, rule.max_depth)
+                break
+
+        if depth >= max_depth:
+            return _ActionResult(
+                success=False,
+                error=f"委派链深度已达上限 ({max_depth})，拒绝进一步委派",
+            )
+
+        # 构造委派消息
+        message_template = payload.get("message_template", "请将以下任务完成:\n{task}")
+        delegated_task = message_template.format(task=task)
+
+        if self._bus is None:
+            return _ActionResult(
+                success=False,
+                error="未连接消息总线，无法执行 Agent 间委派",
+            )
+
+        # 发送 task 消息
+        from youmi.bus.message import WorkflowMessage, WorkflowMessageType
+        wf_msg = WorkflowMessage(
+            workflow_id=self._workflow_id,
+            from_agent_id=self.agent_id,
+            to_agent_id=target_agent_id,
+            msg_type=WorkflowMessageType.TASK,
+            role=MessageRole.AGENT,
+            content=delegated_task,
+            metadata={
+                "delegation": True,
+                "depth": depth + 1,
+                "original_agent_id": payload.get("original_agent_id", self.agent_id),
+            },
+        )
+        await self._bus.publish(wf_msg)
+
+        logger.info(
+            "Agent '%s' delegating to '%s' (depth=%d): %s",
+            self.name, target_agent_id, depth + 1, task[:80],
+        )
+
+        # 等待 feedback 回复
+        timeout = handoff_cfg.timeout_seconds
+        feedback = await self._bus.wait_for_message(
+            self.agent_id, timeout=timeout,
+        )
+
+        if feedback is None:
+            return _ActionResult(
+                success=False,
+                error=f"委派超时 ({timeout}s): 未收到 '{target_agent_id}' 的反馈",
+            )
+
+        # 解析反馈
+        result_content = feedback.content
+        success = feedback.msg_type == WorkflowMessageType.FEEDBACK
+
         return _ActionResult(
-            success=False,
-            error="Delegation 未配置，请在 on_initialize 中设置 delegate_handler",
+            success=success,
+            output=result_content,
+            error=None if success else f"委派失败: {result_content}",
         )
 
     # -----------------------------------------------------------------------
@@ -1537,6 +1727,55 @@ class Agent:
     async def on_message_received(self, message: AgentMessage) -> None:
         """消息接收钩子"""
         pass
+
+    async def handoff(
+        self,
+        target_agent_id: str,
+        task: str,
+        message_template: str = "",
+    ) -> _ActionResult:
+        """显式委派任务给另一个 Agent (P1: Handoff)
+
+        与 _execute_delegation 相同，但作为公共方法供子类或外部调用。
+
+        Args:
+            target_agent_id: 目标 Agent ID
+            task: 任务描述
+            message_template: 消息模板 (可选)
+
+        Returns:
+            _ActionResult 包含委派结果
+        """
+        return await self._execute_delegation({
+            "target_agent_id": target_agent_id,
+            "task": task,
+            "message_template": message_template,
+            "depth": 0,
+        })
+
+    def match_handoff_rule(self, message_content: str) -> HandoffRule | None:
+        """根据消息内容匹配委派规则 (P1: Handoff)
+
+        按 trigger_keywords 匹配，第一个匹配的规则优先。
+
+        Args:
+            message_content: 用户/Agent 消息内容
+
+        Returns:
+            匹配的 HandoffRule，无匹配时返回 None
+        """
+        handoff_cfg = self._config.handoff
+        if not handoff_cfg.enabled:
+            return None
+
+        content_lower = message_content.lower()
+        for rule in handoff_cfg.rules:
+            if not rule.enabled:
+                continue
+            for kw in rule.trigger_keywords:
+                if kw.lower() in content_lower:
+                    return rule
+        return None
 
     # -----------------------------------------------------------------------
     # 序列化 & 诊断

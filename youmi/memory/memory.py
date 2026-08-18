@@ -20,6 +20,11 @@
     # 方式4: 直接传入策略实例
     manager = MemoryManager(agent_id="a1", strategy=FullMemoryStrategy(agent_id="a1"))
 
+    # 方式5: 启用 Session 持久化
+    from youmi.memory.backends import SQLiteBackend
+    backend = SQLiteBackend(db_path="sessions.db")
+    manager = MemoryManager(agent_id="a1", strategy="full", persistence_backend=backend)
+
     # 统一调用
     await manager.initialize()
     await manager.on_message("user", "你好")
@@ -29,6 +34,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from youmi.memory.strategies.base import MemoryStrategy
@@ -41,6 +47,23 @@ from youmi.memory.strategies import (
     register_strategy,
     LLMCallFn,
 )
+
+# 延迟导入避免循环依赖
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from youmi.memory.backends.base import PersistenceBackend
+
+# 运行时导入 (供 __all__ 重新导出)
+from youmi.memory.backends.base import PersistenceBackend as _PersistenceBackend  # noqa: E402
+from youmi.memory.backends.sqlite_backend import SQLiteBackend as _SQLiteBackend  # noqa: E402
+from youmi.memory.backends.file_backend import FileBackend as _FileBackend  # noqa: E402
+from youmi.memory.compaction import ContextCompactor as _ContextCompactor  # noqa: E402
+
+# 公开名称绑定
+PersistenceBackend = _PersistenceBackend
+SQLiteBackend = _SQLiteBackend
+FileBackend = _FileBackend
+ContextCompactor = _ContextCompactor
 
 
 class MemoryManager:
@@ -56,6 +79,7 @@ class MemoryManager:
             - MemoryStrategy: 策略实例 (直接使用)
         config: 策略配置参数
         llm_call: LLM 调用函数 (summary / lstm 策略使用)
+        persistence_backend: Session 持久化后端 (可选)
     """
 
     def __init__(
@@ -64,8 +88,11 @@ class MemoryManager:
         strategy: str | MemoryStrategy = "full",
         config: dict[str, Any] | None = None,
         llm_call: LLMCallFn | None = None,
+        persistence_backend: PersistenceBackend | None = None,
     ) -> None:
         self._agent_id = agent_id
+        self._persistence = persistence_backend
+        self._current_session_id: str = ""
 
         if isinstance(strategy, MemoryStrategy):
             self._strategy = strategy
@@ -95,17 +122,32 @@ class MemoryManager:
     def agent_id(self) -> str:
         return self._agent_id
 
+    @property
+    def persistence(self) -> PersistenceBackend | None:
+        """当前持久化后端 (None 表示未启用)"""
+        return self._persistence
+
+    @property
+    def current_session_id(self) -> str:
+        """当前 session ID (空字符串表示未创建)"""
+        return self._current_session_id
+
     # ------------------------------------------------------------------
     # 生命周期 (与 Agent 生命周期对齐)
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        """初始化记忆策略 (建立连接、加载历史数据等)"""
+        """初始化记忆策略 + 持久化后端 (建立连接、加载历史数据等)"""
         await self._strategy.initialize()
+        if self._persistence is not None:
+            await self._persistence.initialize()
 
     async def on_session_end(self) -> None:
         """会话结束钩子 (归档、持久化、生成摘要等)"""
         await self._strategy.on_session_end()
+        # 持久化当前 session
+        if self._persistence is not None and self._current_session_id:
+            await self._save_current_session()
 
     # ------------------------------------------------------------------
     # 核心操作
@@ -135,6 +177,80 @@ class MemoryManager:
         await self._strategy.clear()
 
     # ------------------------------------------------------------------
+    # Session 持久化
+    # ------------------------------------------------------------------
+
+    def start_session(self, session_id: str = "") -> str:
+        """开始一个新的 session
+
+        Args:
+            session_id: session ID，为空则自动生成
+
+        Returns:
+            session ID
+        """
+        self._current_session_id = session_id or uuid.uuid4().hex[:16]
+        return self._current_session_id
+
+    async def restore_session(self, session_id: str = "") -> list[dict[str, str]] | None:
+        """从持久化后端恢复 session 消息
+
+        Args:
+            session_id: 指定 session ID。为空则恢复最近的 session。
+
+        Returns:
+            恢复的消息列表 (OpenAI 格式)，无 session 或后端未启用时返回 None
+        """
+        if self._persistence is None:
+            return None
+
+        if session_id:
+            messages = await self._persistence.load_messages(session_id)
+            if messages:
+                self._current_session_id = session_id
+                return messages
+            return None
+
+        # 自动恢复最近的 session
+        latest = await self._persistence.get_latest_session(self._agent_id)
+        if latest is None:
+            return None
+
+        messages = await self._persistence.load_messages(latest.session_id)
+        if messages:
+            self._current_session_id = latest.session_id
+            return messages
+        return None
+
+    async def save_session(self, messages: list[dict[str, Any]], session_id: str = "") -> None:
+        """将消息列表保存到持久化后端
+
+        Args:
+            messages: OpenAI 格式消息列表
+            session_id: session ID，为空则使用当前 session
+        """
+        if self._persistence is None:
+            return
+        sid = session_id or self._current_session_id
+        if not sid:
+            sid = self.start_session()
+        await self._persistence.save_session(sid, self._agent_id, messages)
+
+    async def _save_current_session(self) -> None:
+        """保存当前策略中的消息到持久化后端"""
+        if self._persistence is None or not self._current_session_id:
+            return
+        messages = await self._strategy.get_context()
+        await self._persistence.save_session(
+            self._current_session_id, self._agent_id, messages,
+        )
+
+    async def close(self) -> None:
+        """关闭持久化后端"""
+        if self._persistence is not None:
+            await self._persistence.close()
+
+    # ------------------------------------------------------------------
     # 诊断
     # ------------------------------------------------------------------
 
@@ -159,4 +275,10 @@ __all__ = [
     "list_strategies",
     "register_strategy",
     "LLMCallFn",
+    # 持久化后端
+    "PersistenceBackend",
+    "SQLiteBackend",
+    "FileBackend",
+    # Compactor
+    "ContextCompactor",
 ]

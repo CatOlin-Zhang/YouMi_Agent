@@ -20,6 +20,12 @@ from youmi.memory.memory import (
     LLMCallFn,
 )
 
+# P0: Compaction + Persistence
+from youmi.memory.compaction import ContextCompactor
+from youmi.memory.backends.base import PersistenceBackend
+from youmi.memory.backends.sqlite_backend import SQLiteBackend
+from youmi.memory.backends.file_backend import FileBackend
+
 __all__ = [
     # 底层存储 (兼容旧接口)
     "LongTermBackend",
@@ -38,4 +44,10 @@ __all__ = [
     "list_strategies",
     "register_strategy",
     "LLMCallFn",
+    # P0: 上下文压缩
+    "ContextCompactor",
+    # P0: Session 持久化后端
+    "PersistenceBackend",
+    "SQLiteBackend",
+    "FileBackend",
 ]
