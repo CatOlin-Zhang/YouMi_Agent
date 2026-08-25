@@ -339,6 +339,55 @@ class ToolsConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 工具发现配置 (ToolVault 向量搜索)
+# ---------------------------------------------------------------------------
+
+class ToolDiscoveryConfig(BaseModel):
+    """工具发现配置 — 向量搜索 + 动态上下文加载
+
+    启用后，MCPServer 将创建 ToolVault 管理工具的三级上下文:
+    - HOT: 完整 schema 在 LLM 上下文中
+    - WARM: 仅摘要可见，可快速重载
+    - COLD: 仅在 Vault 中，需语义搜索发现
+
+    Args:
+        enabled: 是否启用工具发现
+        embedding_model: Embedding 模型名称
+        max_hot_tools: 热态工具上限
+        recycle_after_turns: N 轮未使用则从 HOT 降级为 WARM
+        search_top_k: 语义搜索结果数量
+        min_similarity: 最低相似度阈值
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="是否启用工具发现 (向量搜索 + 动态加载)",
+    )
+    embedding_model: str = Field(
+        default="nomic-embed-text",
+        description="Embedding 模型名称 (OpenAI/Ollama 兼容)",
+    )
+    max_hot_tools: int = Field(
+        default=15, gt=0,
+        description="热态工具数量上限",
+    )
+    recycle_after_turns: int = Field(
+        default=3, ge=1,
+        description="连续 N 轮未使用的非必备热态工具降级为温态",
+    )
+    search_top_k: int = Field(
+        default=5, gt=0,
+        description="语义搜索返回结果数量",
+    )
+    min_similarity: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description="语义搜索最低相似度阈值",
+    )
+
+    model_config = {"frozen": True}
+
+
+# ---------------------------------------------------------------------------
 # Handoff / 任务委派配置 (P1: OC-4)
 # ---------------------------------------------------------------------------
 

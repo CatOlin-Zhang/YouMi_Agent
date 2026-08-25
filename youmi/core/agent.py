@@ -43,6 +43,9 @@ from youmi.core.types import (
     ToolsConfig,
 )
 from youmi.core.tool import ToolRegistry
+from youmi.core.hooks import HookRegistry, HookType, HookContext, HookDecision, HookDecisionType
+from youmi.core.plugin import Plugin, PluginManager
+from youmi.core.prompt import PromptAssembler, PromptLayer
 from youmi.llm.client import LLMClient, LLMResponse
 from youmi.memory.base import MemoryAdapter
 from youmi.memory.memory import MemoryManager
@@ -205,6 +208,21 @@ class _Reflection(BaseModel):
     next_hint: str = ""
 
 
+class _TaskSelfCheck(BaseModel):
+    """任务自检结果 — SubAgent 在 run() 前检查工具是否充足"""
+    is_sufficient: bool = True
+    missing_capabilities: list[str] = Field(default_factory=list)
+    suggestion: str = ""
+    request_tools: bool = False  # 是否需要申请更多工具
+
+
+class _ToolRequest(BaseModel):
+    """工具权限申请"""
+    tool_description: str = ""
+    reason: str = ""
+    approved: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Agent 基类
 # ---------------------------------------------------------------------------
@@ -263,6 +281,9 @@ class Agent:
         strategy = memory_strategy or config.memory_config.strategy
         strategy_config = config.memory_config.strategy_config or None
 
+        # 工具权限初始快照（用于工作流级回收）
+        self._initial_allowed_tools: set[str] | None = None
+
         # Session 持久化后端初始化 (P0: Persistence)
         persistence_backend = self._create_persistence_backend(
             config.memory_config.persistence,
@@ -307,6 +328,13 @@ class Agent:
 
         # 运行期间的完整消息列表 (包含 tool_calls / tool results)
         self._conversation: list[dict[str, Any]] = []
+
+        # Hook / 插件系统 (P2: OC-5)
+        self._hook_registry = HookRegistry()
+        self._plugin_manager = PluginManager(self._hook_registry)
+
+        # Prompt 动态组装器 (P2: OC-6)
+        self._prompt_assembler: PromptAssembler | None = None
 
     # -----------------------------------------------------------------------
     # 公共属性
@@ -381,6 +409,31 @@ class Agent:
         P0: Compaction。启用后在 _observe() 中自动压缩过长的上下文。
         """
         return getattr(self, '_compactor', None)
+
+    @property
+    def hook_registry(self) -> HookRegistry:
+        """钩子注册表 (P2: OC-5)
+
+        用于注册 before_tool_call / after_tool_call 等拦截钩子。
+        """
+        return self._hook_registry
+
+    @property
+    def plugin_manager(self) -> PluginManager:
+        """插件管理器 (P2: OC-5)
+
+        管理已安装的插件实例。通过 plugin_manager.register(plugin) 安装。
+        """
+        return self._plugin_manager
+
+    @property
+    def prompt_assembler(self) -> PromptAssembler | None:
+        """Prompt 动态组装器 (P2: OC-6)
+
+        非 None 时，_observe() 会使用组装器生成 system prompt。
+        可通过 add_prompt_layer() 添加额外层。
+        """
+        return self._prompt_assembler
 
     @staticmethod
     def _detect_project_root() -> str:
@@ -480,6 +533,9 @@ class Agent:
                 if handler:
                     self._tool_registry.register(defn, handler)
                     registered += 1
+
+        # 注册 search_new_tools 兆底工具（structure.md §2 + §5.2）
+        self._register_search_new_tools()
 
         logger.info("Agent '%s' registered %d builtin tools (exclude=%s)",
                      self.name, registered, effective_exclude)
@@ -734,11 +790,130 @@ class Agent:
             mcp_client=client,
             allowed_tools=allowed,
         )
+        # 保存初始工具权限快照（用于工作流级权限回收）
+        self._initial_allowed_tools = (
+            set(allowed) if allowed else None
+        )
+
         self._tool_bridge._provider = provider  # 保留引用供 register_tool 使用
         self._mcp_pending_provider = provider  # 标记需要在 initialize 时注册
 
         logger.info("Agent '%s' connected to MCP (provider=%s, builtin=%s)",
                      self.name, provider_id, builtin_tools)
+
+        # 注册 search_new_tools 兆底工具（structure.md §2 + §5.2）
+        self._register_search_new_tools()
+
+    def reset_tool_permissions(self) -> None:
+        """重置工具权限到初始状态（工作流级回收）
+
+        将 ToolBridge 的 allowed_tools 恢复为初始配置值。
+        由 MasterAgent 在工作流结束后调用（structure.md §2 权限回收策略）。
+        """
+        if self._tool_bridge is not None:
+            if self._initial_allowed_tools is not None:
+                self._tool_bridge._allowed_tools = set(self._initial_allowed_tools)
+            else:
+                self._tool_bridge._allowed_tools = None
+            logger.info(
+                "Agent '%s' tool permissions reset to initial state",
+                self.name,
+            )
+
+    def _register_search_new_tools(self) -> None:
+        """注册 search_new_tools 兆底工具 (structure.md §2 + §5.2)
+
+        Agent 在 ReAct 循环中工具不足时可调用此工具，
+        通过 ToolBridge / ToolVault / ToolRegistry 发现新工具。
+        """
+        from youmi.core.tool import ToolDefinition, ToolParameter
+
+        SEARCH_NEW_TOOLS_DEF = ToolDefinition(
+            name="search_new_tools",
+            description=(
+                "搜索发现当前可用但尚未授权的新工具。"
+                "当你觉得当前工具不足以完成任务时，调用此工具搜索可用工具。"
+                "返回候选工具列表，你可以选择需要的工具并通过消息总线申请授权。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="query",
+                    type="string",
+                    description="自然语言描述你需要的工具功能",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="top_k",
+                    type="integer",
+                    description="返回候选工具数量",
+                    required=False,
+                    default=5,
+                ),
+            ],
+        )
+
+        async def _search_new_tools(query: str, top_k: int = 5) -> str:
+            results: list[dict[str, Any]] = []
+
+            # 路径 1: ToolBridge + ToolVault 向量搜索 (MCP 模式)
+            if self._tool_bridge is not None:
+                vault = getattr(self._tool_bridge, '_vault', None)
+                if vault is not None:
+                    try:
+                        search_results = await vault.search(
+                            query, top_k=top_k, min_score=0.2,
+                        )
+                        current = self._tool_bridge.allowed_tools or set()
+                        for r in search_results:
+                            if r.tool_name not in current:
+                                results.append({
+                                    "name": r.tool_name,
+                                    "score": round(r.score, 3),
+                                    "summary": r.summary,
+                                })
+                    except Exception as exc:
+                        logger.debug("Vault search failed: %s", exc)
+
+                # 回退: 检查 provider 中未在白名单中的工具
+                if not results:
+                    try:
+                        all_tools = await self._tool_bridge.mcp_client.list_tools()
+                        current = self._tool_bridge.allowed_tools or set()
+                        query_lower = query.lower()
+                        for t in all_tools:
+                            if t.name not in current:
+                                desc = getattr(t, 'description', '')
+                                if any(kw in desc.lower() for kw in query_lower.split() if len(kw) > 2):
+                                    results.append({
+                                        "name": t.name,
+                                        "score": 0.5,
+                                        "summary": desc[:100],
+                                    })
+                    except Exception:
+                        pass
+
+            # 路径 2: ToolRegistry 关键词搜索 (非 MCP 模式)
+            if not results and self._tool_registry:
+                all_defs = self._tool_registry._definitions
+                query_lower = query.lower()
+                for name, defn in all_defs.items():
+                    desc = defn.description.lower()
+                    if any(kw in desc or kw in name.lower()
+                           for kw in query_lower.split() if len(kw) > 2):
+                        results.append({
+                            "name": name,
+                            "score": 0.5,
+                            "summary": defn.description[:100],
+                        })
+
+            return json.dumps(
+                {"candidates": results[:top_k], "total": len(results)},
+                ensure_ascii=False,
+            )
+
+        if self._tool_registry and "search_new_tools" not in self._tool_registry:
+            self._tool_registry.register(SEARCH_NEW_TOOLS_DEF, _search_new_tools)
+            logger.debug("Agent '%s' registered search_new_tools fallback", self.name)
 
     @property
     def is_alive(self) -> bool:
@@ -780,6 +955,11 @@ class Agent:
         if self._compactor is not None and self._compactor._llm_call is None and self._llm_client is not None:
             self._compactor._llm_call = self._make_llm_call_fn()
 
+        # Prompt 动态组装器初始化 (P2: OC-6)
+        self._prompt_assembler = PromptAssembler.from_system_prompt(
+            self._config.system_prompt,
+        )
+
         self._status = AgentStatus.IDLE
         logger.info("Agent '%s' [%s] initialized (memory=%s, mcp=%s, compaction=%s, persistence=%s).",
                      self.name, self.agent_id, self._memory.strategy_name,
@@ -803,6 +983,29 @@ class Agent:
         self._task_start_time = datetime.utcnow()
 
         await self.on_start(task)
+
+        # P1: 任务自检 — 检查工具是否充足
+        self_check = await self._self_check_task(task)
+        if not self_check.is_sufficient:
+            # 将缺失能力注入到 prompt 中
+            if self_check.missing_capabilities and self._prompt_assembler is not None:
+                check_hint = (
+                    "\n\n[工具自检提醒] 当前工具可能不足以完成任务，"
+                    "缺少的能力: " + "、".join(self_check.missing_capabilities) + "。"
+                    "请尽力使用已有工具完成，或在必要时申请扩展工具。"
+                )
+                self._prompt_assembler.add_layer(PromptLayer(
+                    name="task_self_check",
+                    content=check_hint,
+                    priority=70,
+                ))
+            # 如果需要申请工具
+            if self_check.request_tools and self._bus is not None:
+                for cap in self_check.missing_capabilities:
+                    await self.request_tool(
+                        tool_description=cap,
+                        reason=f"完成以下任务需要: {task[:100]}",
+                    )
 
         # 启动新 session (P0: Persistence)
         if self._memory.persistence is not None:
@@ -1341,9 +1544,34 @@ class Agent:
 
         默认实现: 返回 self._conversation 列表 (含 system/user/assistant/tool 消息)。
         集成 Compactor: 在返回前检查并按需压缩上下文 (P0: Compaction)。
+        集成 PromptAssembler: 动态组装 system prompt (P2: OC-6)。
+        集成 Hook: 触发 before_prompt_build 钩子 (P2: OC-5)。
         子类可扩展: 注入额外记忆、环境信息等。
         """
         conversation = list(self._conversation)
+
+        # P2: OC-6 — Prompt 动态组装
+        if self._prompt_assembler is not None and len(self._prompt_assembler.layers) > 1:
+            # 有额外层时，重新组装 system prompt
+            assembled = self._prompt_assembler.assemble(
+                max_tokens=self._config.llm_config.max_context_tokens // 4,
+            )
+            if conversation and conversation[0].get("role") == "system":
+                conversation[0] = {"role": "system", "content": assembled}
+
+        # P2: OC-5 — before_prompt_build 钩子
+        if self._hook_registry.has_hooks(HookType.BEFORE_PROMPT_BUILD):
+            ctx = HookContext(
+                hook_type=HookType.BEFORE_PROMPT_BUILD,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                messages=conversation,
+            )
+            decision = await self._hook_registry.invoke(
+                HookType.BEFORE_PROMPT_BUILD, ctx,
+            )
+            if decision.decision == HookDecisionType.MODIFY and "messages" in decision.modified_data:
+                conversation = decision.modified_data["messages"]
 
         # Compaction: 检查并按需压缩上下文
         if self._compactor is not None:
@@ -1380,11 +1608,42 @@ class Agent:
         else:
             tools_schema = self._tool_registry.to_openai_tools() if self._tool_registry else None
 
+        # P2: OC-5 — before_model_call 钩子
+        messages_for_llm = list(observation.messages)
+        if self._hook_registry.has_hooks(HookType.BEFORE_MODEL_CALL):
+            ctx = HookContext(
+                hook_type=HookType.BEFORE_MODEL_CALL,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                messages=messages_for_llm,
+            )
+            decision = await self._hook_registry.invoke(HookType.BEFORE_MODEL_CALL, ctx)
+            if decision.decision == HookDecisionType.BLOCK:
+                logger.info("before_model_call hook blocked: %s", decision.reason)
+                return _Thought(
+                    action_type="respond",
+                    action_payload={"response": f"[模型调用被拦截] {decision.reason}"},
+                    should_continue=False,
+                )
+            if decision.decision == HookDecisionType.MODIFY and "messages" in decision.modified_data:
+                messages_for_llm = decision.modified_data["messages"]
+
         # 调用 LLM
         response: LLMResponse = await self._llm_client.chat(
-            messages=observation.messages,
+            messages=messages_for_llm,
             tools=tools_schema or None,
         )
+
+        # P2: OC-5 — after_model_call 钩子
+        if self._hook_registry.has_hooks(HookType.AFTER_MODEL_CALL):
+            ctx = HookContext(
+                hook_type=HookType.AFTER_MODEL_CALL,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                messages=messages_for_llm,
+                response=response,
+            )
+            await self._hook_registry.invoke(HookType.AFTER_MODEL_CALL, ctx)
 
         # 将 assistant 回复追加到 conversation
         assistant_msg = response.raw_message
@@ -1506,17 +1765,63 @@ class Agent:
         退化到 ToolRegistry 直接执行。
 
         失败时自动向 ToolGuardianAgent 汇报（如果已连接）。
+        集成 before_tool_call / after_tool_call 钩子 (P2: OC-5)。
 
         流程:
         1. 从 payload 提取工具名和参数
-        2. 通过 ToolBridge 或 ToolRegistry 执行
-        3. 将结果以 tool role 消息追加到 conversation
-        4. 同步写入记忆系统
-        5. 失败时自动汇报给 ToolGuardianAgent
+        2. 触发 before_tool_call 钩子 (可拦截/修改)
+        3. 通过 ToolBridge 或 ToolRegistry 执行
+        4. 触发 after_tool_call 钩子 (可修改结果)
+        5. 将结果以 tool role 消息追加到 conversation
+        6. 同步写入记忆系统
+        7. 失败时自动汇报给 ToolGuardianAgent
         """
         name = payload.get("name", "")
         arguments = payload.get("arguments", {})
         tool_call_id = payload.get("tool_call_id", "")
+        result_str: str = ""
+
+        # P2: OC-5 — before_tool_call 钩子
+        if self._hook_registry.has_hooks(HookType.BEFORE_TOOL_CALL):
+            ctx = HookContext(
+                hook_type=HookType.BEFORE_TOOL_CALL,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                tool_name=name,
+                tool_arguments=arguments,
+            )
+            decision = await self._hook_registry.invoke(HookType.BEFORE_TOOL_CALL, ctx)
+            if decision.decision == HookDecisionType.BLOCK:
+                logger.info("before_tool_call hook blocked tool '%s': %s", name, decision.reason)
+                return _ActionResult(
+                    success=False,
+                    error=f"工具调用被拦截: {decision.reason}",
+                )
+            if decision.decision == HookDecisionType.MODIFY:
+                if "tool_arguments" in decision.modified_data:
+                    arguments = decision.modified_data["tool_arguments"]
+
+        # --- 实际工具执行 ---
+        action_result = await self._do_execute_tool(name, arguments, tool_call_id)
+
+        # P2: OC-5 — after_tool_call 钩子
+        if self._hook_registry.has_hooks(HookType.AFTER_TOOL_CALL):
+            ctx = HookContext(
+                hook_type=HookType.AFTER_TOOL_CALL,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                tool_name=name,
+                tool_arguments=arguments,
+                tool_result=action_result.output if action_result.success else action_result.error,
+            )
+            await self._hook_registry.invoke(HookType.AFTER_TOOL_CALL, ctx)
+
+        return action_result
+
+    async def _do_execute_tool(
+        self, name: str, arguments: dict[str, Any], tool_call_id: str,
+    ) -> _ActionResult:
+        """实际工具执行逻辑（从 _execute_tool_call 拆分，方便钩子包装）"""
         result_str: str = ""
 
         if self._tool_bridge is not None:
@@ -1721,7 +2026,10 @@ class Agent:
         pass
 
     async def on_destroy(self) -> None:
-        """销毁钩子 — 释放资源、关闭连接"""
+        """销毁钩子 — 释放资源、关闭连接、卸载插件"""
+        # P2: OC-5 — 自动卸载所有插件
+        if hasattr(self, '_plugin_manager') and len(self._plugin_manager) > 0:
+            await self._plugin_manager.unregister_all()
         pass
 
     async def on_message_received(self, message: AgentMessage) -> None:
@@ -1778,6 +2086,36 @@ class Agent:
         return None
 
     # -----------------------------------------------------------------------
+    # P2: 插件与 Prompt 便捷接口
+    # -----------------------------------------------------------------------
+
+    async def install_plugin(self, plugin: Plugin) -> None:
+        """安装插件 (P2: OC-5 便捷方法)
+
+        将插件注册到 HookRegistry 并安装到 PluginManager。
+        建议在 on_initialize 钩子中调用。
+
+        Args:
+            plugin: Plugin 实例
+        """
+        await self._plugin_manager.register(plugin)
+
+    def add_prompt_layer(self, layer: PromptLayer) -> None:
+        """添加 Prompt 层 (P2: OC-6 便捷方法)
+
+        将一个新的 PromptLayer 添加到 PromptAssembler。
+        如果 PromptAssembler 未初始化，则自动创建。
+
+        Args:
+            layer: PromptLayer 实例
+        """
+        if self._prompt_assembler is None:
+            self._prompt_assembler = PromptAssembler.from_system_prompt(
+                self._config.system_prompt,
+            )
+        self._prompt_assembler.add_layer(layer)
+
+    # -----------------------------------------------------------------------
     # 序列化 & 诊断
     # -----------------------------------------------------------------------
 
@@ -1804,6 +2142,138 @@ class Agent:
             f"name={self.name!r} "
             f"status={self._status.value}>"
         )
+
+    # -----------------------------------------------------------------------
+    # P1: 任务自检与工具申请
+    # -----------------------------------------------------------------------
+
+    async def _self_check_task(self, task: str) -> _TaskSelfCheck:
+        """任务自检 — 检查当前工具是否足以完成任务
+
+        在 run() 的 on_start() 之后、ReAct 循环之前调用。
+        无 LLM 客户端时退化为乐观策略（认为工具充足）。
+
+        Args:
+            task: 任务描述
+
+        Returns:
+            _TaskSelfCheck 结果
+        """
+        # 收集可用工具
+        available_tools: list[str] = list(self._tool_registry.tool_names) if self._tool_registry else []
+        if self._tool_bridge is not None:
+            bridge_tools = getattr(self._tool_bridge, '_allowed_tools', None)
+            if bridge_tools:
+                available_tools = list(set(available_tools) | set(bridge_tools))
+
+        if not available_tools:
+            return _TaskSelfCheck(is_sufficient=True)  # 无工具场景不做自检
+
+        if self._llm_client is None:
+            return _TaskSelfCheck(is_sufficient=True)  # 无 LLM 时乐观
+
+        # 构造自检 prompt
+        check_prompt = (
+            f"你是一个工具充足性评估专家。\n"
+            f"\n任务描述: {task}\n"
+            f"\n当前可用工具: {', '.join(available_tools)}\n"
+            f"\n请判断上述工具是否足以完成任务。"
+            f"回复 JSON 格式: "
+            f'{{"is_sufficient": true/false, "missing": ["缺少的能力1", ...], "suggestion": "建议"}}\n'
+            f"只回复 JSON，不要其他内容。"
+        )
+
+        try:
+            response = await self._llm_client.chat(
+                messages=[{"role": "user", "content": check_prompt}],
+            )
+            content = response.content.strip()
+            # 尝试解析 JSON
+            import re
+            json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                is_sufficient = data.get("is_sufficient", True)
+                missing = data.get("missing", [])
+                suggestion = data.get("suggestion", "")
+                return _TaskSelfCheck(
+                    is_sufficient=is_sufficient,
+                    missing_capabilities=missing,
+                    suggestion=suggestion,
+                    request_tools=not is_sufficient and bool(missing),
+                )
+        except Exception as exc:
+            logger.debug("Self-check LLM call failed (non-critical): %s", exc)
+
+        return _TaskSelfCheck(is_sufficient=True)  # 解析失败时乐观
+
+    async def request_tool(self, tool_description: str, reason: str) -> bool:
+        """向 MasterAgent 申请扩展工具权限
+
+        通过消息总线发送 TOOL_REQUEST 消息，等待 TOOL_RESPONSE 回复。
+        未连接消息总线时直接返回 False。
+
+        Args:
+            tool_description: 需要的工具能力描述
+            reason: 申请原因
+
+        Returns:
+            True 表示批准，False 表示拒绝或无法申请
+        """
+        if self._bus is None:
+            logger.warning(
+                "Agent '%s' cannot request tool: not connected to bus",
+                self.name,
+            )
+            return False
+
+        from youmi.bus.message import WorkflowMessage, WorkflowMessageType
+
+        request_payload = json.dumps({
+            "tool_description": tool_description,
+            "reason": reason,
+        }, ensure_ascii=False)
+
+        wf_msg = WorkflowMessage(
+            workflow_id=self._workflow_id,
+            from_agent_id=self.agent_id,
+            to_agent_id=None,  # 广播，MasterAgent 会接收
+            msg_type=WorkflowMessageType.TOOL_REQUEST,
+            role=MessageRole.AGENT,
+            content=request_payload,
+            metadata={"request_type": "tool_extension"},
+        )
+        await self._bus.publish(wf_msg)
+
+        logger.info(
+            "Agent '%s' requesting tool: %s (reason: %s)",
+            self.name, tool_description, reason[:60],
+        )
+
+        # 等待回复
+        try:
+            response = await self._bus.wait_for_message(
+                self.agent_id, timeout=15.0,
+            )
+            if response is None:
+                logger.warning("Tool request timed out for agent '%s'", self.name)
+                return False
+
+            if response.msg_type == WorkflowMessageType.TOOL_RESPONSE:
+                resp_data = json.loads(response.content)
+                approved = resp_data.get("approved", False)
+                if approved:
+                    logger.info("Tool request approved for agent '%s'", self.name)
+                else:
+                    logger.info(
+                        "Tool request denied for agent '%s': %s",
+                        self.name, resp_data.get("reason", ""),
+                    )
+                return approved
+        except Exception as exc:
+            logger.debug("Tool request wait failed: %s", exc)
+
+        return False
 
     # -----------------------------------------------------------------------
     # 内部工具

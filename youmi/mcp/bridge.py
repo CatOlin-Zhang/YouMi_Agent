@@ -6,6 +6,8 @@ ToolBridge — Agent 与 MCP Server 之间的桥梁
 2. 工具调用 — 通过 MCPClient 发送请求到 MCPServer
 3. Schema 生成 — 为 LLM function calling 提供 tools 格式
 4. 调用追踪 — 记录工具调用日志
+5. 召回确认闭环 — 搜索工具后确认/否决/扩大搜索
+6. 上下文注入 — 为 SubAgent 注入指定工具到 HOT 状态
 
 Agent 通过 ToolBridge 与 MCP 层交互，
 不再直接持有 ToolRegistry。
@@ -23,6 +25,13 @@ Agent 通过 ToolBridge 与 MCP 层交互，
 
     # 执行工具
     result = await bridge.call_tool("get_weather", {"city": "北京"})
+
+    # 召回确认闭环
+    result = await bridge.search_and_confirm("我需要一个发送邮件的工具")
+    if result:
+        print(f"找到工具: {result.tool_name}")
+    else:
+        print("没有该功能的工具")
 """
 
 from __future__ import annotations
@@ -32,6 +41,12 @@ from typing import Any
 
 from youmi.mcp.client import MCPClient
 from youmi.mcp.protocol import MCPToolInfo, MCPToolResult, ToolContext
+
+# 延迟导入避免循环依赖
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from youmi.mcp.vault import ToolVault, ToolSearchResult
+    from youmi.mcp.context import AgentToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +64,8 @@ class ToolBridge:
         agent_id: Agent 唯一 ID
         mcp_client: MCP 客户端实例
         allowed_tools: 授权的工具名称列表。空列表表示不限制。
+        vault: ToolVault 实例 (可选, 启用工具发现模式)
+        context: AgentToolContext 实例 (可选, 启用 Agent 侧上下文状态管理)
     """
 
     def __init__(
@@ -56,6 +73,8 @@ class ToolBridge:
         agent_id: str,
         mcp_client: MCPClient,
         allowed_tools: list[str] | None = None,
+        vault: ToolVault | None = None,
+        context: AgentToolContext | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._client = mcp_client
@@ -63,6 +82,12 @@ class ToolBridge:
             set(allowed_tools) if allowed_tools else None
         )
         self._call_count: int = 0
+        # ToolVault 集成 (可选)
+        self._vault = vault
+        # AgentToolContext 集成 (可选, 优先于 Vault 的 tier 状态)
+        self._context = context
+        # 召回确认闭环状态
+        self._rejected_tools: set[str] = set()
 
     @property
     def agent_id(self) -> str:
@@ -75,6 +100,16 @@ class ToolBridge:
     @property
     def allowed_tools(self) -> set[str] | None:
         return self._allowed_tools
+
+    @property
+    def vault(self) -> ToolVault | None:
+        """ToolVault 实例 (可选)"""
+        return self._vault
+
+    @property
+    def context(self) -> AgentToolContext | None:
+        """AgentToolContext 实例 (可选)"""
+        return self._context
 
     # ------------------------------------------------------------------
     # 工具调用
@@ -122,6 +157,12 @@ class ToolBridge:
             logger.debug("ToolBridge: %s ← OK: %s",
                           tool_name, result.text[:100])
 
+        # 记录工具使用 (优先 AgentToolContext, 其次 Vault)
+        if self._context is not None:
+            self._context.record_usage(tool_name)
+        elif self._vault is not None:
+            self._vault.record_usage(tool_name)
+
         return result
 
     # ------------------------------------------------------------------
@@ -138,17 +179,128 @@ class ToolBridge:
     def to_openai_tools(self) -> list[dict[str, Any]]:
         """生成 OpenAI tools 格式 schema (仅包含授权工具)
 
-        同步方法 — 从 MCPClient/Server 缓存中获取。
+        同步方法 — 优先级: AgentToolContext > ToolVault > MCPClient。
+        如果启用了 AgentToolContext，只返回 Agent 的热态工具。
         如果设置了 allowed_tools，则过滤。
         """
-        all_schemas = self._client.to_openai_tools()
+        # 优先级: AgentToolContext > ToolVault > MCPClient
+        if self._context is not None:
+            schemas = self._context.to_openai_tools()
+        elif self._vault is not None:
+            schemas = self._vault.to_openai_tools()
+        else:
+            schemas = self._client.to_openai_tools()
+
         if self._allowed_tools is None:
-            return all_schemas
+            return schemas
 
         return [
-            s for s in all_schemas
+            s for s in schemas
             if s.get("function", {}).get("name", "") in self._allowed_tools
         ]
+
+    def to_warm_summaries(self) -> list[dict[str, str]]:
+        """生成温态工具摘要 (优先 AgentToolContext, 其次 Vault)"""
+        if self._context is not None:
+            summaries = self._context.to_warm_summaries()
+        elif self._vault is not None:
+            summaries = self._vault.to_warm_summaries()
+        else:
+            return []
+
+        if self._allowed_tools is not None:
+            summaries = [s for s in summaries if s.get("name") in self._allowed_tools]
+        return summaries
+
+    # ------------------------------------------------------------------
+    # 工具发现与动态加载 (Vault 模式)
+    # ------------------------------------------------------------------
+
+    async def discover_tools(
+        self,
+        query: str,
+        top_k: int = 5,
+        min_score: float = 0.3,
+    ) -> list[dict[str, Any]]:
+        """语义搜索工具 (仅 Vault 模式可用)
+
+        Agent 生成对于工具功能的描述，向量匹配这些向量头拉取匹配度最高的。
+
+        Args:
+            query: 自然语言查询 (如 "我需要一个能发送通知的工具")
+            top_k: 返回结果数量
+            min_score: 最低相似度阈值
+
+        Returns:
+            搜索结果列表 [{"tool_name": ..., "score": ..., "summary": ...}]
+        """
+        if self._vault is None:
+            return []
+
+        results = await self._vault.search(query, top_k=top_k, min_score=min_score)
+
+        # 应用 allowed_tools 过滤
+        if self._allowed_tools is not None:
+            results = [r for r in results if r.tool_name in self._allowed_tools]
+
+        return [
+            {
+                "tool_name": r.tool_name,
+                "score": r.score,
+                "summary": r.summary,
+            }
+            for r in results
+        ]
+
+    async def load_tool(self, tool_name: str) -> bool:
+        """将工具从 COLD/WARM 加载到 HOT
+
+        Agent 选择好后 query 对应的工具内容并加载到上下文。
+        WARM 工具直接加载，无需重走发现流程。
+        如果启用了 AgentToolContext，委托给 context.promote()。
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            是否成功加载
+        """
+        # 优先 AgentToolContext
+        if self._context is not None:
+            return await self._context.promote(tool_name)
+
+        if self._vault is None:
+            return False
+
+        entry = await self._vault.load_tool(tool_name)
+        return entry is not None
+
+    def recycle_tools(self, idle_threshold: int = 3) -> list[str]:
+        """LRU 回收: 降级闲置的热态工具
+
+        多轮对话没有调用就会回收，回收仅去除上下文的加载，
+        不会回收 agent 对于这个工具的权限，仅保留工具摘要。
+        优先使用 AgentToolContext.recycle()。
+
+        Args:
+            idle_threshold: 闲置轮次阈值
+
+        Returns:
+            被回收的工具名列表
+        """
+        if self._context is not None:
+            return self._context.recycle(idle_threshold=idle_threshold)
+        if self._vault is None:
+            return []
+        return self._vault.recycle(idle_threshold=idle_threshold)
+
+    def advance_turn(self) -> int:
+        """推进对话轮次计数器 (优先 AgentToolContext)"""
+        if self._context is not None:
+            return self._context.advance_turn()
+        if self._vault is not None:
+            return self._vault.advance_turn()
+        return 0
 
     # ------------------------------------------------------------------
     # 权限管理
@@ -179,9 +331,142 @@ class ToolBridge:
     def call_count(self) -> int:
         return self._call_count
 
+    # ------------------------------------------------------------------
+    # 召回确认闭环
+    # ------------------------------------------------------------------
+
+    async def search_and_confirm(
+        self,
+        query: str,
+        max_retries: int = 3,
+        top_k: int = 5,
+        min_score: float = 0.3,
+    ) -> ToolSearchResult | None:
+        """搜索工具并确认闭环
+
+        流程:
+        1. 向量搜索返回 top-k
+        2. 取最佳候选返回给调用方
+        3. 调用方确认合适 → 自动加载到上下文并返回
+        4. 调用方确认不合适 → 排除该项，扩大搜索
+        5. max_retries 次后仍无合适结果 → 返回 None ("没有该功能的工具")
+
+        注意: 此方法自动执行第 1-2 步并返回最佳候选。
+        调用方可使用 confirm_search_result() / reject_search_result()
+        完成闭环，或直接使用返回结果。
+
+        Args:
+            query: 自然语言查询
+            max_retries: 最大重试次数
+            top_k: 每次搜索结果数
+            min_score: 最低相似度阈值
+
+        Returns:
+            最佳匹配的 ToolSearchResult，或 None (无匹配)
+        """
+        if self._vault is None:
+            return None
+
+        for attempt in range(max_retries):
+            results = await self._vault.search(
+                query,
+                top_k=top_k,
+                min_score=min_score,
+                exclude=self._rejected_tools if self._rejected_tools else None,
+            )
+
+            # 应用 allowed_tools 过滤
+            if self._allowed_tools is not None:
+                results = [r for r in results if r.tool_name in self._allowed_tools]
+
+            if not results:
+                logger.info(
+                    "ToolBridge[%s]: search_and_confirm 第%d次无结果",
+                    self._agent_id, attempt + 1,
+                )
+                return None
+
+            # 返回最佳候选
+            best = results[0]
+            logger.debug(
+                "ToolBridge[%s]: search_and_confirm 候选 '%s' (score=%.3f, attempt=%d)",
+                self._agent_id, best.tool_name, best.score, attempt + 1,
+            )
+            return best
+
+        return None
+
+    def confirm_search_result(self, tool_name: str) -> None:
+        """确认搜索结果合适，加载到上下文并清理拒绝列表
+
+        Args:
+            tool_name: 确认的工具名称
+        """
+        # 添加到权限白名单
+        self.add_allowed_tool(tool_name)
+
+        # 清理拒绝列表
+        self._rejected_tools.clear()
+
+        logger.debug("ToolBridge[%s]: confirmed tool '%s'", self._agent_id, tool_name)
+
+    def reject_search_result(self, tool_name: str) -> None:
+        """否决搜索结果，将其加入排除列表
+
+        下次 search_and_confirm() 将排除此工具。
+
+        Args:
+            tool_name: 被否决的工具名称
+        """
+        self._rejected_tools.add(tool_name)
+        logger.debug(
+            "ToolBridge[%s]: rejected tool '%s' (total rejected: %d)",
+            self._agent_id, tool_name, len(self._rejected_tools),
+        )
+
+    def reset_rejected(self) -> None:
+        """重置已否决工具列表 (新查询时调用)"""
+        self._rejected_tools.clear()
+
+    # ------------------------------------------------------------------
+    # 上下文注入 (MCP_Agent 功能)
+    # ------------------------------------------------------------------
+
+    async def inject_tool_context(self, tool_names: list[str]) -> int:
+        """为 SubAgent 注入工具上下文
+
+        将指定工具加载到 AgentToolContext 的 HOT 状态，
+        使 SubAgent 在下一轮 _think() 时能看到这些工具。
+
+        Args:
+            tool_names: 要注入的工具名称列表
+
+        Returns:
+            成功注入的工具数量
+        """
+        if self._context is None:
+            # 退化: 仅添加到 allowed_tools
+            for name in tool_names:
+                self.add_allowed_tool(name)
+            return len(tool_names)
+
+        injected = 0
+        for name in tool_names:
+            success = await self._context.promote(name)
+            if success:
+                self.add_allowed_tool(name)
+                injected += 1
+
+        logger.info(
+            "ToolBridge[%s]: injected %d/%d tools to context",
+            self._agent_id, injected, len(tool_names),
+        )
+        return injected
+
     def __repr__(self) -> str:
         allowed = list(self._allowed_tools) if self._allowed_tools else "*"
+        ctx_info = " context=True" if self._context else ""
         return (
             f"<ToolBridge agent={self._agent_id!r} "
-            f"allowed={allowed} calls={self._call_count}>"
+            f"allowed={allowed} calls={self._call_count}{ctx_info}>"
         )

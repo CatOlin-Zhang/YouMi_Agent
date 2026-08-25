@@ -32,6 +32,11 @@ from youmi.mcp.protocol import (
 )
 from youmi.mcp.provider import ToolProvider
 
+# 延迟导入避免循环依赖
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from youmi.mcp.vault import ToolVault, ToolSearchResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +62,7 @@ class MCPServer:
         result = await server.call_tool("get_weather", {"city": "北京"}, ctx)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, vault: ToolVault | None = None) -> None:
         self._providers: dict[str, ToolProvider] = {}
         # 工具名 → provider_id 的路由缓存
         self._tool_route: dict[str, str] = {}
@@ -65,16 +70,28 @@ class MCPServer:
         # 调用统计
         self._call_count: int = 0
         self._error_count: int = 0
+        # ToolVault 集成 (可选)
+        self._vault = vault
+
+    @property
+    def vault(self) -> ToolVault | None:
+        """ToolVault 实例 (可选)"""
+        return self._vault
 
     # ------------------------------------------------------------------
     # Provider 管理
     # ------------------------------------------------------------------
 
-    async def register_provider(self, provider: ToolProvider) -> None:
+    async def register_provider(
+        self,
+        provider: ToolProvider,
+        essential_names: set[str] | None = None,
+    ) -> None:
         """注册 ToolProvider
 
         Args:
             provider: 工具提供者实例
+            essential_names: 必备工具名称集合 (传给 Vault)
         """
         pid = provider.provider_id
         if pid in self._providers:
@@ -91,6 +108,12 @@ class MCPServer:
 
         logger.info("Registered provider '%s' with %d tools: %s",
                      pid, len(tools), [t.name for t in tools])
+
+        # 同步注册到 Vault (如果可用)
+        if self._vault is not None:
+            await self._vault.add_tools_from_provider(
+                provider, essential_names=essential_names,
+            )
 
     async def unregister_provider(self, provider_id: str) -> None:
         """注销 Provider 及其所有工具"""
@@ -238,8 +261,12 @@ class MCPServer:
         """生成 OpenAI tools 格式 schema (供 LLM function calling 使用)
 
         同步方法 — 从缓存的路由表中直接生成。
-        需要先调用 list_tools() 或直接 register_provider() 以填充路由。
+        如果启用了 ToolVault，只返回热态工具的 schema。
         """
+        # 如果有 Vault，只返回热态工具
+        if self._vault is not None:
+            return self._vault.to_openai_tools()
+
         schemas: list[dict[str, Any]] = []
         for provider in self._providers.values():
             # 从 provider 内部定义生成 (LocalFunctionProvider 有 _definitions)
@@ -247,6 +274,42 @@ class MCPServer:
             for defn in definitions.values():
                 schemas.append(defn.to_openai_function_schema())
         return schemas
+
+    def to_warm_summaries(self) -> list[dict[str, str]]:
+        """生成温态工具摘要列表 (仅 Vault 模式可用)"""
+        if self._vault is None:
+            return []
+        return self._vault.to_warm_summaries()
+
+    async def search_tools(
+        self,
+        query: str,
+        top_k: int = 5,
+        min_score: float = 0.3,
+    ) -> list[dict[str, Any]]:
+        """语义搜索工具 (仅 Vault 模式可用)
+
+        Args:
+            query: 自然语言查询
+            top_k: 返回结果数量
+            min_score: 最低相似度阈值
+
+        Returns:
+            搜索结果列表 [{"tool_name": ..., "score": ..., "summary": ...}]
+        """
+        if self._vault is None:
+            return []
+
+        results = await self._vault.search(query, top_k=top_k, min_score=min_score)
+        return [
+            {
+                "tool_name": r.tool_name,
+                "score": r.score,
+                "summary": r.summary,
+                "definition": r.definition.to_openai_function_schema() if r.definition else None,
+            }
+            for r in results
+        ]
 
     def update_tool_description(
         self,

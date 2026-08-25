@@ -135,6 +135,54 @@ async def list_available_roles(master: MasterAgent, **kwargs: Any) -> str:
     }, ensure_ascii=False)
 
 
+async def approve_tool_request(master: MasterAgent, **kwargs: Any) -> str:
+    """批准子 Agent 的工具权限申请。
+
+    Args:
+        master: MasterAgent 实例
+        **kwargs: agent_id(必需), tool_names(必需)
+
+    Returns:
+        JSON 字符串，包含批准结果
+    """
+    agent_id = kwargs.get("agent_id", "")
+    tool_names = kwargs.get("tool_names") or []
+
+    ok = master.approve_tool_request(agent_id, tool_names)
+    logger.info("Tool approve_tool_request: agent=%s tools=%s → %s",
+                agent_id, tool_names, "approved" if ok else "failed")
+
+    return json.dumps({
+        "agent_id": agent_id,
+        "approved": ok,
+        "tool_names": tool_names,
+    }, ensure_ascii=False)
+
+
+async def deny_tool_request(master: MasterAgent, **kwargs: Any) -> str:
+    """拒绝子 Agent 的工具权限申请。
+
+    Args:
+        master: MasterAgent 实例
+        **kwargs: agent_id(必需), reason(可选)
+
+    Returns:
+        JSON 字符串，包含拒绝结果
+    """
+    agent_id = kwargs.get("agent_id", "")
+    reason = kwargs.get("reason", "")
+
+    ok = master.deny_tool_request(agent_id, reason)
+    logger.info("Tool deny_tool_request: agent=%s → %s",
+                agent_id, "denied" if ok else "no_pending_request")
+
+    return json.dumps({
+        "agent_id": agent_id,
+        "denied": ok,
+        "reason": reason,
+    }, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 工具定义 (ToolDefinition)
 # ---------------------------------------------------------------------------
@@ -204,19 +252,64 @@ LIST_AVAILABLE_ROLES_DEF = ToolDefinition(
     parameters=[],
 )
 
+APPROVE_TOOL_REQUEST_DEF = ToolDefinition(
+    name="approve_tool_request",
+    description=(
+        "批准子 Agent 的工具权限申请。"
+        "当子 Agent 报告工具不足时，使用此工具批准其申请的工具。"
+    ),
+    parameters=[
+        ToolParameter(
+            name="agent_id",
+            type="string",
+            description="申请工具的子 Agent ID",
+            required=True,
+        ),
+        ToolParameter(
+            name="tool_names",
+            type="array",
+            description="批准的工具名称列表",
+            required=True,
+            items={"type": "string"},
+        ),
+    ],
+)
+
+DENY_TOOL_REQUEST_DEF = ToolDefinition(
+    name="deny_tool_request",
+    description="拒绝子 Agent 的工具权限申请。",
+    parameters=[
+        ToolParameter(
+            name="agent_id",
+            type="string",
+            description="申请工具的子 Agent ID",
+            required=True,
+        ),
+        ToolParameter(
+            name="reason",
+            type="string",
+            description="拒绝原因",
+            required=False,
+            default="",
+        ),
+    ],
+)
+
 
 # ---------------------------------------------------------------------------
 # 注册入口
 # ---------------------------------------------------------------------------
 
 def register_coordinator_tools(master: MasterAgent) -> None:
-    """将 4 个协调器工具注册到 MasterAgent 的 ToolRegistry
+    """将 6 个协调器工具注册到 MasterAgent 的 ToolRegistry
 
     注册的工具:
     - create_sub_agent: 创建子 Agent
     - run_sub_agent: 运行子 Agent
     - list_sub_agents: 列出子 Agent
     - list_available_roles: 列出可用角色
+    - approve_tool_request: 批准工具申请
+    - deny_tool_request: 拒绝工具申请
 
     Args:
         master: MasterAgent 实例，工具处理函数会绑定到此实例
@@ -235,13 +328,22 @@ def register_coordinator_tools(master: MasterAgent) -> None:
     async def _roles(**kwargs: Any) -> str:
         return await list_available_roles(master, **kwargs)
 
+    async def _approve(**kwargs: Any) -> str:
+        return await approve_tool_request(master, **kwargs)
+
+    async def _deny(**kwargs: Any) -> str:
+        return await deny_tool_request(master, **kwargs)
+
     registry.register(CREATE_SUB_AGENT_DEF, _create)
     registry.register(RUN_SUB_AGENT_DEF, _run)
     registry.register(LIST_SUB_AGENTS_DEF, _list)
     registry.register(LIST_AVAILABLE_ROLES_DEF, _roles)
+    registry.register(APPROVE_TOOL_REQUEST_DEF, _approve)
+    registry.register(DENY_TOOL_REQUEST_DEF, _deny)
 
     logger.info(
-        "Registered 4 coordinator tools for MasterAgent '%s': "
-        "create_sub_agent, run_sub_agent, list_sub_agents, list_available_roles",
+        "Registered 6 coordinator tools for MasterAgent '%s': "
+        "create_sub_agent, run_sub_agent, list_sub_agents, list_available_roles, "
+        "approve_tool_request, deny_tool_request",
         master.name,
     )

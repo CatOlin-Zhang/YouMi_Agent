@@ -34,18 +34,22 @@ class WorkflowMessageType(str, Enum):
     - feedback: 结果反馈（SubAgent → MasterAgent）
     - status: 状态更新（广播）
     - query: 跨 Agent 询问（点对点）
+    - tool_request: 工具权限申请（SubAgent → MasterAgent）
+    - tool_response: 工具申请回复（MasterAgent → SubAgent）
     """
 
     TASK = "task"
     FEEDBACK = "feedback"
     STATUS = "status"
     QUERY = "query"
+    TOOL_REQUEST = "tool_request"
+    TOOL_RESPONSE = "tool_response"
 
     @property
     def writes_to_memory(self) -> bool:
         """是否写入 Agent 记忆系统
 
-        task 和 feedback 写入记忆；status 和 query 仅入队不写记忆。
+        task 和 feedback 写入记忆；status、query、tool_request、tool_response 仅入队不写记忆。
         """
         return self in (WorkflowMessageType.TASK, WorkflowMessageType.FEEDBACK)
 

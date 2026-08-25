@@ -63,11 +63,15 @@ class ToolDefinition(BaseModel):
     包含名称、描述、参数 schema，用于:
     1. 生成 OpenAI function calling 的 tools 格式
     2. 在 ToolRegistry 中查找和校验
+    3. 版本管理与持久化存储
     """
 
     name: str = Field(description="工具名称 (唯一标识)")
     description: str = Field(default="", description="工具功能描述")
     parameters: list[ToolParameter] = Field(default_factory=list)
+    version: str = Field(default="0.0.1", description="语义化版本号")
+    language: str = Field(default="python", description="工具实现语言")
+    runtime: str = Field(default="python", description="运行时标识")
 
     def to_openai_function_schema(self) -> dict[str, Any]:
         """生成 OpenAI function calling 的 tool 定义"""
@@ -92,6 +96,7 @@ class ToolDefinition(BaseModel):
             "function": {
                 "name": self.name,
                 "description": self.description,
+                "version": self.version,
                 "parameters": {
                     "type": "object",
                     "properties": properties,
@@ -270,6 +275,60 @@ class ToolRegistry:
 
     def __repr__(self) -> str:
         return f"<ToolRegistry tools={self.tool_names}>"
+
+
+# ---------------------------------------------------------------------------
+# 工具版本记录
+# ---------------------------------------------------------------------------
+
+class ToolVersion(BaseModel):
+    """工具版本记录 — 存储在 ToolStore 中的版本链条目
+
+    版本号格式为语义化版本 (semver): major.minor.patch
+    - patch: bug 修复，不改版本号 (通过 changelog 记录)
+    - minor: 功能增强或说明更新
+    - major: 破坏性变更
+
+    Args:
+        version: 语义化版本号 (如 "0.0.1")
+        parent_version_id: 父版本的 tool_id (None 表示初始版本)
+        definition_json: ToolDefinition 的 JSON 序列化
+        created_at: 创建时间 ISO 格式
+        changelog: 版本变更说明
+    """
+
+    version: str
+    parent_version_id: str | None = None
+    definition_json: str = ""
+    created_at: str = ""
+    changelog: str = ""
+
+
+def bump_version(current: str, bump_type: str = "patch") -> str:
+    """语义化版本号自增
+
+    Args:
+        current: 当前版本号 (如 "1.2.3")
+        bump_type: 自增类型 "patch" | "minor" | "major"
+
+    Returns:
+        新版本号
+    """
+    parts = current.split(".")
+    if len(parts) != 3:
+        return "0.0.1"
+
+    try:
+        major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return "0.0.1"
+
+    if bump_type == "major":
+        return f"{major + 1}.0.0"
+    elif bump_type == "minor":
+        return f"{major}.{minor + 1}.0"
+    else:  # patch
+        return f"{major}.{minor}.{patch + 1}"
 
 
 # ---------------------------------------------------------------------------

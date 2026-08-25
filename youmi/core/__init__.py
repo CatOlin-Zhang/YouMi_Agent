@@ -16,6 +16,15 @@ from youmi.core.types import (
     BuiltinToolsConfig,
     CustomToolRef,
 )
+from youmi.core.hooks import (
+    HookRegistry,
+    HookType,
+    HookContext,
+    HookDecision,
+    HookDecisionType,
+)
+from youmi.core.plugin import Plugin, PluginManager
+from youmi.core.prompt import PromptAssembler, PromptLayer
 
 __all__ = [
     "Agent",
@@ -36,4 +45,15 @@ __all__ = [
     "ToolsConfig",
     "BuiltinToolsConfig",
     "CustomToolRef",
+    # P2: Hook / Plugin
+    "HookRegistry",
+    "HookType",
+    "HookContext",
+    "HookDecision",
+    "HookDecisionType",
+    "Plugin",
+    "PluginManager",
+    # P2: Prompt
+    "PromptAssembler",
+    "PromptLayer",
 ]

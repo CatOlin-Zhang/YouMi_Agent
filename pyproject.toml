@@ -24,6 +24,9 @@ dev = [
 gui = [
     "streamlit>=1.30",
 ]
+vec = [
+    "sqlite-vec>=0.1",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]
