@@ -1,0 +1,3 @@
+# GUI 运行时依赖（与引擎依赖相互独立）
+# 安装：pip install -r gui/requirements.txt
+aiohttp>=3.9

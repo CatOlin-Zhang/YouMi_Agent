@@ -1,0 +1,57 @@
+{
+  "sessions": [
+    {
+      "session_id": "sess_24b27397fea7",
+      "type": "single",
+      "name": "验证会话",
+      "owner_agent_id": "master",
+      "member_ids": [
+        "master"
+      ],
+      "created_at": 1787709716.7544188,
+      "updated_at": 1787709716.7544188
+    },
+    {
+      "session_id": "sess_eaebb6da3e28",
+      "type": "single",
+      "name": "验证会话",
+      "owner_agent_id": "master",
+      "member_ids": [
+        "master"
+      ],
+      "created_at": 1787709766.2734544,
+      "updated_at": 1787709768.528916
+    },
+    {
+      "session_id": "sess_0f6d7e084f6b",
+      "type": "single",
+      "name": "验证会话",
+      "owner_agent_id": "master",
+      "member_ids": [
+        "master"
+      ],
+      "created_at": 1787709880.5330706,
+      "updated_at": 1787709882.7814412
+    }
+  ],
+  "cards": {
+    "master": {
+      "agent_id": "master",
+      "name": "master",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "agent_f08940fc880b": {
+      "agent_id": "agent_f08940fc880b",
+      "name": "程序员",
+      "role": "coder",
+      "color": "#9c36b5",
+      "status": "idle",
+      "bio": "负责编写、修改与调试代码",
+      "task": "创建一个智能家居自然语言指令转换系统，需求如下：\n\n1. 接收自然语言输入（如'我回家了，把客厅灯打开'）\n2. 解析语义意图，识别设备、操作、参数、场景\n3. 支持设备：light/air_conditioner/curtain/speaker/lock/camera/sensor\n4. 房间：living_room/bedroom/kitchen/bathroom/study/master_bedroom\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n5. 输出标准化 JSON 指令，包含 intent/actions/device_type/device_id/room/action/parameters\n"
+    }
+  }
+}

@@ -469,6 +469,11 @@ def make_tool_call_response(tool_name: str, arguments: dict, tool_call_id: str =
     }
 
 
+def make_self_check_response() -> dict:
+    """构造 _self_check_task 使用的 LLM 响应 (工具充足)"""
+    return make_text_response('{"is_sufficient": true, "missing": [], "suggestion": ""}')
+
+
 # =========================================================================
 # Test 6: Agent + connect_mcp() 完整闭环
 # =========================================================================
@@ -500,8 +505,9 @@ async def test_agent_mcp_integration() -> None:
     check("initialize 后 server 有 provider", len(server.provider_ids) == 1)
     check("server tool_count>=1", server.tool_count >= 1)
 
-    # 注入 mock LLM: 先调用工具，再给出最终回复
+    # 注入 mock LLM: self_check + 先调用工具 + 最终回复
     mock_llm = MockLLMClient([
+        make_self_check_response(),
         make_tool_call_response("get_weather", {"city": "北京"}, "call_001"),
         make_text_response("北京今天 25°C，天气不错！"),
     ])
@@ -518,11 +524,11 @@ async def test_agent_mcp_integration() -> None:
     check("conversation 含 tool 消息", len(tool_msgs) >= 1)
     check("tool 消息含结果", "25°C" in tool_msgs[0].get("content", ""))
 
-    # 验证 LLM 第 1 次调用时 tools schema 来自 MCP
-    first_call = mock_llm.call_history[0]
-    check("LLM 收到 tools schema", first_call["tools"] is not None)
+    # 验证 LLM 第 2 次调用时 (self_check 后) tools schema 来自 MCP
+    tool_call = mock_llm.call_history[1]
+    check("LLM 收到 tools schema", tool_call["tools"] is not None)
     check("tools schema 含 get_weather",
-          any(s.get("function", {}).get("name") == "get_weather" for s in first_call["tools"]))
+          any(s.get("function", {}).get("name") == "get_weather" for s in tool_call["tools"]))
 
     # ToolBridge call_count
     check("ToolBridge 被调用过", agent.tool_bridge.call_count >= 1)
@@ -547,6 +553,7 @@ async def test_agent_dual_mode() -> None:
     check("无 MCP 时 tool_bridge=None", agent_a.tool_bridge is None)
 
     mock_llm_a = MockLLMClient([
+        make_self_check_response(),
         make_tool_call_response("get_weather", {"city": "上海"}, "call_a1"),
         make_text_response("上海 28°C"),
     ])
@@ -571,6 +578,7 @@ async def test_agent_dual_mode() -> None:
     check("MCP 模式 tool_bridge 非空", agent_b.tool_bridge is not None)
 
     mock_llm_b = MockLLMClient([
+        make_self_check_response(),
         make_tool_call_response("get_weather", {"city": "上海"}, "call_b1"),
         make_text_response("上海 28°C via MCP"),
     ])

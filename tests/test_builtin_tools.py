@@ -359,7 +359,7 @@ class TestAgentBuiltinTools:
 
         assert len(agent.tool_registry) == 0
         agent.register_builtin_tools()
-        assert len(agent.tool_registry) == 9
+        assert len(agent.tool_registry) == 10  # 9 内置 + search_new_tools
         assert "file_read" in agent.tool_registry
         assert "shell_exec" in agent.tool_registry
 

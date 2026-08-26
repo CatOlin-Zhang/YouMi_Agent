@@ -496,7 +496,7 @@ class ToolStore:
                 """SELECT tool_id, version, parent_version_id, definition_json,
                           created_at, updated_at
                    FROM tools WHERE tool_name = ?
-                   ORDER BY created_at DESC""",
+                   ORDER BY created_at DESC, rowid DESC""",
                 (tool_name,),
             ).fetchall()
 
@@ -709,13 +709,13 @@ class ToolStore:
 
         def _search():
             rows = conn.execute(
-                """SELECT tool_name, definition_json, summary
-                   FROM tools
+                """SELECT t.tool_name, t.definition_json, t.summary
+                   FROM tools t
                    INNER JOIN (
                        SELECT tool_name, MAX(created_at) as max_created
                        FROM tools GROUP BY tool_name
-                   ) latest ON tools.tool_name = latest.tool_name
-                           AND tools.created_at = latest.max_created
+                   ) latest ON t.tool_name = latest.tool_name
+                           AND t.created_at = latest.max_created
                 """
             ).fetchall()
             return rows

@@ -1,6 +1,6 @@
 # YouMi Agent 实施计划
 
-> 最后更新：2026-08-25
+> 最后更新：2026-08-26
 >
 > 本文档已合并 `supplement_roadmap.md`（生产就绪缺口分析），形成统一的开发路线图。
 
@@ -10,9 +10,11 @@
 
 核心框架（Agent 基类、MCP 协议层、记忆系统、消息总线、内置工具、MasterAgent、ToolGuardian、Hook/插件、Prompt 动态组装、ToolVault 向量搜索、GUI）已具备可用雏形。
 
+GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入共享 MCPServer + ToolVault（sqlite-vec 方案），消息总线通过 InProcessBroker 互联。MasterAgent 提示词已清理硬编码角色列表，改为动态查询。
+
 但对照完整生命周期流程图，**编排层高级能力（层级架构）、工具版本管理、全局记忆收集、自动工具更新闭环**等高级能力尚未落地。
 
-**总体完成度：约 70%**
+**总体完成度：约 75%**
 
 **生产就绪度：较低** — 当前缺乏重试容错、安全加固、可观测性、部署形态等生产必需能力，需优先补齐。
 
@@ -99,35 +101,38 @@
 
 ## Phase 4：渐进式工具暴露、向量搜索与 MCP 工具生命周期
 
-### 已实现（当前为内存实现）
+### 已实现（核心模块 + sqlite-vec 持久化 + GUI 集成）
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
 | EmbeddingClient 向量客户端 | `youmi/llm/embeddings.py` | 生成工具需求描述的向量表示 |
-| ToolVault（内存版） | `youmi/mcp/vault.py` | 内存存储工具条目、向量、HOT/WARM/COLD 状态 |
-| ToolVault search()（内存余弦相似度） | `youmi/mcp/vault.py` | 语义搜索返回 top-k |
-| MCPServer 集成 ToolVault | `youmi/mcp/server.py` | 统一路由 + `search_tools()` |
+| ToolVault（内存版 + 向量搜索） | `youmi/mcp/vault.py` | 内存存储工具条目、向量、HOT/WARM/COLD 状态；语义搜索返回 top-k |
+| ToolStore（sqlite-vec 持久化存储层） | `youmi/mcp/tool_store.py` | SQLite + 向量索引：`tools`、`vec_tools`、`tool_changelogs`、`tool_aliases`、`tool_tags`、`tool_dependencies` 6 张表 |
+| ToolVault ↔ ToolStore 集成 | `youmi/mcp/vault.py` | Vault 作为内存一级缓存，Store 作为持久化层；`add_tool()` 同步写入 Store，`search()` 委托 Store 搜索 |
+| 向量数据库增量更新 | `youmi/mcp/tool_store.py` | 新工具/新版本插入即更新 `vec_tools`；无需全量 `build_embeddings()` |
+| 工具版本号与版本链 | `youmi/mcp/tool_store.py` | `tools` 表 `version` + `parent_version_id`；`create_version()` + `get_version_chain()` |
+| 工具内部变更日志 | `youmi/mcp/tool_store.py` | `tool_changelogs` 表记录同版本内的 bug 修复说明 |
 | ToolBridge discover/load/recycle | `youmi/mcp/bridge.py` | 工具发现、加载到上下文、LRU 回收 |
+| ToolBridge 集成 Vault | `youmi/mcp/bridge.py` | `ToolBridge(vault=...)` + `to_openai_tools()` 优先从 Vault 取 schema |
 | LocalFunctionProvider | `youmi/mcp/provider.py` | 本地函数注册与执行 |
 | MCPServer JSON-RPC | `youmi/mcp/server.py` | 统一路由 |
 | MCPClient | `youmi/mcp/client.py` | 进程内客户端 |
 | ToolGuardianAgent | `youmi/coordinator/tool_guardian.py` | 修复工具摘要/代码建议 |
+| **MCPService（GUI 集成层）** | `gui/engine/mcp_service.py` | GUI 级 MCP 服务层：MCPServer + BuiltinToolProvider + ToolStore + ToolVault + EmbeddingClient 一体化 |
+| **sqlite-vec 默认启用** | `gui/engine/mcp_service.py` | MCPService.setup() 默认创建 ToolStore + ToolVault + EmbeddingClient，工具描述向量化后存入 SQLite |
+| **优雅降级策略** | `gui/engine/mcp_service.py` | Embedding 失败 → 关键词搜索；Store 失败 → 纯内存；任何异常不阻塞 MCP 主流程 |
+| **GUI Agent 自动接入 Vault** | `gui/engine/bridge.py` | Master 和子 Agent 的 ToolBridge 自动注入共享 Vault 实例 |
 
-### 未实现（sqlite-vec 持久化存储层重构）
+### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
-| 基于 sqlite-vec 的工具持久化存储层 | 当前 ToolVault 为内存存储，需重构为 SQLite + 向量索引；表：`tools`（元数据+版本链）、`vec_tools`（向量虚拟表）、`tool_changelogs`（bug 修复记录）、`tool_aliases`、`tool_tags`、`tool_dependencies` |
-| 工具版本号与版本索引 | `tools` 表 `version` 字段 + `parent_version_id` 版本链；版本号格式 `0.0.1`；bug 修复不改版本，说明/功能变更才升版本 |
-| 工具内部变更日志 | `tool_changelogs` 表记录同版本内的 bug 修复说明，由 LLM 生成，供人类创作者迭代 |
-| 旧版本兼容机制 | 外部 Skill 引入的 tool 修改后，原 Skill 可继续指向旧版本 |
-| 向量数据库增量更新 | 新工具/新版本插入即更新 `vec_tools`；无需全量 `build_embeddings()` |
-| Agent 侧 HOT/WARM/COLD 状态管理 | 当前由 `ToolVault` 管理，需迁移到 `ToolBridge` / `AgentToolContext`；数据库只存 tool 定义，不存上下文状态 |
+| AgentToolContext 三级状态管理 | 当前由 `ToolVault` 管理 HOT/WARM/COLD，需迁移到 `ToolBridge` / `AgentToolContext`；数据库只存 tool 定义，不存上下文状态 |
 | MCP_Agent 功能封装 | 可作为 MCP Server / ToolBridge / Vault 中的功能，负责帮 SubAgent 添加合适工具上下文 |
 | 召回确认闭环 | 原发起 Agent 确认：合适则加载到上下文；不合适则扩大搜索并排除已否决项；多次不合适回复“没有该功能的工具” |
 | 多语言代码执行接口 | `tools.language` / `tools.runtime` 字段；当前仅实现 Python 执行器，其他语言留扩展接口 |
 | 全局记忆驱动的自动工具修复（并触发版本更新） | 任务结束后基于全局记忆统一修复工具，并创建新版本 |
-| 工具申请审批流 | 三级审批模型已在 `master.py` 实现（auto/manual/master），但无独立 `youmi/mcp/approval.py` 模块 |
+| 工具申请审批流独立模块 | 三级审批模型已在 `master.py` 实现（auto/manual/master），但无独立 `youmi/mcp/approval.py` 模块 |
 
 ---
 
@@ -183,6 +188,38 @@
 | Sub-Master Agent 支持 | 无 Master → Sub-Master → Worker 三层编排 |
 | WorkflowPlan 树形嵌套结构 | 当前为扁平计划，不支持子计划嵌套 |
 | 层级深度限制 | 无配置与防循环机制 |
+
+---
+
+## GUI-Core 集成（GUI 与核心架构同步）
+
+> 将 GUI 后端与核心 MCP/Bus 层完全同步，确保 GUI 中所有 Agent 通过统一工具调用层和消息总线运行。
+
+### 已实现
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| MCPService（GUI MCP 服务层） | `gui/engine/mcp_service.py` | 全局 MCPServer + ToolStore + ToolVault + EmbeddingClient 一体化；默认启用 sqlite-vec 方案 |
+| EngineBridge.init() MCP+Bus 接入 | `gui/engine/bridge.py` | init() 创建 MCPService + InProcessBroker；优雅降级（失败则退化为 ToolRegistry 模式） |
+| 子 Agent 自动接入 MCP+Bus | `gui/engine/bridge.py` | `_patch_create_sub_agent()` 自动注入 Vault + 连接总线 |
+| GUI 配置层 | `gui/config.py` | mcp_enabled / bus_enabled / vault_enabled + 环境变量覆盖 |
+| MasterAgent 提示词清理 | `youmi/agents/master/config.yaml` | 删除硬编码角色列表，改为动态调用 `list_available_roles` |
+| coordinator_ops 角色提示清理 | `youmi/tools/coordinator_ops.py` | 错误提示、工具描述、参数描述均改为引导查询 `list_available_roles` |
+| MCP 配置段 | `youmi/agents/master/config.yaml` | `mcp_config` 含 vault_enabled / embedding / db_path / auto_approve / sensitive |
+| /api/tools REST 端点 | `gui/server.py` | `GET /api/tools` 返回工具列表 + 统计信息 |
+| tool_list WebSocket 事件 | `gui/hub/events.py`, `gui/server.py` | WebSocket 连接时推送工具列表到前端 |
+| MCP 工具面板（前端） | `gui/static/` | HTML + CSS + JS 渲染工具名称、描述、参数信息 |
+| Mock 模式 MCP 接口 | `gui/mock_engine.py` | `list_tools()` / `get_tool_stats()` / `shutdown()` 保持接口一致 |
+| 消息总线 GUI 集成 | `gui/engine/bridge.py` | InProcessBroker 创建 + Master/子 Agent 自动接入 |
+
+### 未实现
+
+| 缺失项 | 说明 |
+|--------|------|
+| 总线事件转发到前端 | 监听 Broker 消息回调，将 Agent 间通信转发为 GUI `agent_message` 事件 |
+| ToolGuardian GUI 集成 | 创建 ToolGuardianAgent 实例接入总线，自动接收子 Agent 工具调用失败汇报 |
+| 工具搜索 UI | 前端工具面板增加「搜索工具」功能（自然语言 → 向量匹配 → 候选工具） |
+| Mock 模式 Vault 数据 | mock_engine.py 返回更丰富的 mock 工具数据（参数 + 描述） |
 
 ---
 
@@ -293,8 +330,7 @@ P0 — 稳定性与安全（生产部署前置条件）
   └── 可观测性：OTel 埋点 + 审计日志 + 监控 + 健康检查       ❌ 未实现
 
 P1 — 功能闭环与生产可用
-  ├── Phase 4  sqlite-vec 持久化存储层重构                   ❌ 未实现
-  ├── Phase 4  工具版本号 + 版本索引 + 变更日志               ❌ 未实现
+  ├── Phase 4  AgentToolContext 三级状态管理                  ❌ 未实现
   ├── Phase 4  召回确认闭环                                  ❌ 未实现
   ├── Phase 6  全局记忆 / 工具经验沉淀                       ❌ 未实现
   ├── Phase 6  记忆向量检索                                  ❌ 未实现
@@ -334,6 +370,13 @@ P3 — 长期扩展与生态
 ✅ 三级审批模型（auto/manual/master）
 ✅ ToolBridge 热更新 + 工作流级权限回收
 ✅ Phase 4  ToolVault 内存版 + 向量搜索（基础版）
+✅ Phase 4  ToolStore sqlite-vec 持久化存储层
+✅ Phase 4  ToolVault ↔ ToolStore 集成 + 向量增量更新
+✅ Phase 4  工具版本号 + 版本链 + 变更日志
+✅ GUI-Core MCP 集成（MCPService + sqlite-vec 默认启用）
+✅ GUI-Core Bus 集成（InProcessBroker + 子 Agent 自动接入）
+✅ GUI 工具面板（前端 + /api/tools + tool_list 事件）
+✅ MasterAgent 提示词动态角色查询（删除硬编码角色列表）
 ```
 
 ---
@@ -342,6 +385,6 @@ P3 — 长期扩展与生态
 
 - **M1 — 基础稳固**：P0 可靠性（重试退避 + 熔断）+ P0 安全（认证 + 沙箱）+ P0 可观测性（OTel + 审计日志）→ 达到「可控、可查、可观测」的最小生产门槛。
 - **M2 — 可运维**：P0 可靠性（持久队列 + 断点续跑 + Saga）+ P1 部署（FastAPI 网关 + Worker + 多租户）→ 支持真实并发与故障恢复。
-- **M3 — 功能完整**：P1 工具生命周期闭环（sqlite-vec + 版本管理）+ P1 全局记忆（经验沉淀 + 向量检索）→ 工具与知识可积累。
+- **M3 — 功能完整**：P1 工具生命周期闭环（AgentToolContext + 召回闭环）+ P1 全局记忆（经验沉淀 + 向量检索）→ 工具与知识可积累。
 - **M4 — 降本增效**：P2 成本治理 + 质量保障 + 工程化 → 成本可控、行为可回归、配置可复现。
 - **M5 — 生态扩展**：P3 互操作 + 层级架构 + 外部通信 → 融入外部 agent 生态，支持复杂编排。

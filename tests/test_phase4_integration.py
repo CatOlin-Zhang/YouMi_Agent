@@ -46,13 +46,14 @@ def _make_entry(
     description: str = "",
     essential: bool = False,
     embedding: list[float] | None = None,
+    tier: ToolContextTier = ToolContextTier.COLD,
 ) -> ToolEntry:
     return ToolEntry(
         tool_name=name,
         definition=_make_tool(name, description or f"工具 {name} 的功能描述"),
         essential=essential,
         summary=(description or f"工具 {name}")[:80],
-        tier=ToolContextTier.COLD,
+        tier=tier,
         embedding=embedding or [],
     )
 

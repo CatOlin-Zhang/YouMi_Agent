@@ -336,15 +336,54 @@ class MasterAgent(Agent):
         if agent.status == AgentStatus.CREATED:
             await agent.initialize()
 
-        # 执行任务
-        result = await agent.run(task=record.task, task_id=agent_id)
+        # 标记正在作为子 Agent 运行（抑制 _after_model 重复气泡）
+        hook_bridge = getattr(self, '_gui_bridge', None)
+        if hook_bridge and hasattr(hook_bridge, 'hook_bridge'):
+            hook_bridge.hook_bridge._sub_agent_running.add(agent.agent_id)
+        try:
+            # 执行任务
+            result = await agent.run(task=record.task, task_id=agent_id)
+        finally:
+            if hook_bridge and hasattr(hook_bridge, 'hook_bridge'):
+                hook_bridge.hook_bridge._sub_agent_running.discard(agent.agent_id)
+
         record.result = result
+
+        # 在群聊中广播子 Agent 的独立结果气泡
+        bridge = getattr(self, '_gui_bridge', None)
+        if bridge is not None and result.output:
+            self._broadcast_sub_result(bridge, agent, result)
 
         logger.info(
             "Sub-agent '%s' finished: status=%s iterations=%d",
             agent.name, result.status.value, result.iterations,
         )
         return result
+
+    def _broadcast_sub_result(self, bridge: Any, agent: Any, result: TaskResult) -> None:
+        """将子 Agent 的执行结果作为独立气泡广播到群聊。"""
+        from gui.engine.models import MessageRecord, new_id
+
+        session_id = bridge.active_session_id
+        if not session_id:
+            return
+        output = str(result.output or "")
+        if len(output) > 3000:
+            output = output[:3000] + "\n...(内容过长已截断)"
+        card = bridge.card_for(agent.agent_id, agent.name)
+        text = f"#### ✅ {card.name} 完成任务\n\n{output}"
+        msg_id = new_id("sub")
+        rec = MessageRecord(
+            msg_id=msg_id,
+            session_id=session_id,
+            agent_id=agent.agent_id,
+            agent_name=card.name,
+            role="assistant",
+            kind="text",
+            text=text,
+        )
+        bridge.open_message(rec)
+        bridge.close_message(msg_id)
 
     async def _run_isolated_sub_agent(self, record: SubAgentRecord) -> TaskResult:
         """在独立子进程中运行子 Agent

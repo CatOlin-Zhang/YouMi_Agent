@@ -43,20 +43,70 @@ async def create_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
     Returns:
         JSON 字符串，包含 agent_id、name、role、task、status
     """
-    role = kwargs.get("role", "general")
+    role = kwargs.get("role", "")
     task = kwargs.get("task", "")
     system_prompt = kwargs.get("system_prompt", "")
     allowed_tools = kwargs.get("allowed_tools") or []
 
-    agent = master.create_sub_agent(
-        role=role,
-        task=task,
-        system_prompt=system_prompt,
-        allowed_tools=allowed_tools or None,
-    )
+    # ---- 参数校验：role 和 task 都不能为空 ----
+    if not role or not role.strip():
+        return json.dumps({
+            "error": "参数错误：role 不能为空。请先调用 list_available_roles 查看可用角色，再指定合适的 role。",
+        }, ensure_ascii=False)
+    if not task or not task.strip():
+        return json.dumps({
+            "error": f"参数错误：task 不能为空。请为 {role} 指定具体的任务描述。",
+        }, ensure_ascii=False)
+
+    # 获取 GUI 工作流追踪器（如果存在）
+    tracker = getattr(master, '_gui_bridge', None)
+    tracker = getattr(tracker, 'tracker', None) if tracker else None
+
+    # 去重：如果已存在同角色且未完成的子 Agent，直接返回已有的
+    for rec in master._sub_agents.values():
+        if rec.role == role and rec.result is None:
+            logger.info(
+                "Tool create_sub_agent: role=%s 已存在未完成的子 Agent %s，复用",
+                role, rec.agent.agent_id,
+            )
+            # 通知 tracker（dedup 路径也要追踪）
+            if tracker:
+                tracker.on_create_sub_agent(role, rec.task, rec.agent.agent_id)
+            return json.dumps({
+                "agent_id": rec.agent.agent_id,
+                "name": rec.agent.name,
+                "role": role,
+                "task": rec.task,
+                "status": "already_exists",
+            }, ensure_ascii=False)
+
+    # 工作流限制预检：防止创建过多子 Agent
+    if tracker and not tracker.can_create_more():
+        return json.dumps({
+            "error": tracker.get_limit_message(),
+            "status": "limit_reached",
+        }, ensure_ascii=False)
+
+    try:
+        agent = master.create_sub_agent(
+            role=role,
+            task=task,
+            system_prompt=system_prompt,
+            allowed_tools=allowed_tools or None,
+        )
+    except RuntimeError as e:
+        # bridge 的硬限制抛出的 RuntimeError，转换为友好的 JSON 响应
+        return json.dumps({
+            "error": str(e),
+            "status": "limit_reached",
+        }, ensure_ascii=False)
 
     logger.info("Tool create_sub_agent: role=%s task=%s → id=%s",
                 role, task[:60], agent.agent_id)
+
+    # 通知 tracker（正常创建路径）
+    if tracker:
+        tracker.on_create_sub_agent(role, task, agent.agent_id)
 
     return json.dumps({
         "agent_id": agent.agent_id,
@@ -68,7 +118,7 @@ async def create_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
 
 
 async def run_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
-    """运行指定的子 Agent，让其执行已分配的任务。
+    """运行指定的子 Agent，让它执行已分配的任务。
 
     Args:
         master: MasterAgent 实例
@@ -79,10 +129,19 @@ async def run_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
     """
     agent_id = kwargs.get("agent_id", "")
 
+    # 获取 GUI 工作流追踪器
+    tracker = getattr(master, '_gui_bridge', None)
+    tracker = getattr(tracker, 'tracker', None) if tracker else None
+
     try:
+        if tracker:
+            tracker.on_run_sub_agent_start(agent_id)
         result = await master.run_sub_agent(agent_id)
         logger.info("Tool run_sub_agent: %s → %s (%d iter)",
                     agent_id, result.status.value, result.iterations)
+        if tracker:
+            output = str(result.output or "")
+            tracker.on_run_sub_agent_done(agent_id, result.status.value, output)
         return json.dumps({
             "agent_id": agent_id,
             "status": result.status.value,
@@ -91,6 +150,8 @@ async def run_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
             "error": result.error,
         }, ensure_ascii=False)
     except KeyError as e:
+        if tracker:
+            tracker.on_run_sub_agent_done(agent_id, "failed", str(e))
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
@@ -191,20 +252,27 @@ CREATE_SUB_AGENT_DEF = ToolDefinition(
     name="create_sub_agent",
     description=(
         "创建一个新的子 Agent 来执行特定任务。"
-        "指定角色（如 coder、reviewer、researcher）和任务描述。"
+        "指定角色和任务描述，可用角色通过 list_available_roles 查询。"
         "创建后需要调用 run_sub_agent 来让它执行任务。"
+        "注意：子 Agent 拥有自己的能力和工具，会自行实现细节；"
+        "task 只需说明目标与要求，不要把完整代码或文件内容放进 task。"
     ),
     parameters=[
         ToolParameter(
             name="role",
             type="string",
-            description="Agent 角色标识，如 coder/reviewer/researcher/writer",
+            description="Agent 角色标识，通过 list_available_roles 获取可用值",
             required=True,
         ),
         ToolParameter(
             name="task",
             type="string",
-            description="分配给子 Agent 的具体任务描述",
+            description=(
+                "分配给子 Agent 的任务描述：简明扼要的自然语言指令"
+                "（建议不超过 200 字），说明目标、要求与验收标准即可。"
+                "禁止在 task 中包含完整代码、文件内容或超长规格——"
+                "子 Agent 会自行实现细节。"
+            ),
             required=True,
         ),
         ToolParameter(

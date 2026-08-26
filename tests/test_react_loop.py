@@ -216,6 +216,11 @@ def make_tool_call_response(tool_name: str, arguments: dict, tool_call_id: str =
     }
 
 
+def make_self_check_response() -> dict:
+    """构造 _self_check_task 使用的 LLM 响应 (工具充足)"""
+    return make_text_response('{"is_sufficient": true, "missing": [], "suggestion": ""}')
+
+
 # =========================================================================
 # Test 3: Agent 纯文本闭环
 # =========================================================================
@@ -263,9 +268,11 @@ async def test_agent_tool_call_loop() -> None:
 
     # 模拟: LLM 先请求调用 get_weather，拿到结果后给出最终回复
     mock_llm = MockLLMClient([
-        # 第1次调用: LLM 请求调用工具
+        # self_check 消耗第 1 次调用
+        make_self_check_response(),
+        # 第2次调用: LLM 请求调用工具
         make_tool_call_response("get_weather", {"city": "北京"}, "call_abc"),
-        # 第2次调用: LLM 看到工具结果，给出最终回复
+        # 第3次调用: LLM 看到工具结果，给出最终回复
         make_text_response("北京今天的天气是 25°C，适合外出。"),
     ])
 
@@ -286,7 +293,7 @@ async def test_agent_tool_call_loop() -> None:
     check("任务成功", result.success)
     check("输出含天气", "25°C" in str(result.output) or "天气" in str(result.output), f"got: {result.output}")
     check("迭代次数=2", result.iterations == 2, f"got: {result.iterations}")
-    check("LLM被调用2次", mock_llm._call_count == 2, f"got: {mock_llm._call_count}")
+    check("LLM被调用3次(self_check+tool+reply)", mock_llm._call_count == 3, f"got: {mock_llm._call_count}")
 
     # 检查 conversation 完整性
     conv = agent._conversation
@@ -296,10 +303,10 @@ async def test_agent_tool_call_loop() -> None:
     check("conv[3]=tool result", conv[3]["role"] == "tool" and "25°C" in conv[3]["content"])
     check("conv[4]=assistant final", conv[4]["role"] == "assistant" and "25°C" in conv[4]["content"])
 
-    # 检查 tools schema 被传给 LLM
-    first_call = mock_llm.call_history[0]
-    check("tools schema已传", first_call["tools"] is not None and len(first_call["tools"]) > 0)
-    check("tools含get_weather", first_call["tools"][0]["function"]["name"] == "get_weather")
+    # 检查 tools schema 被传给 LLM (self_check 是 call_history[0], 工具调用是 [1])
+    tool_call_entry = mock_llm.call_history[1]
+    check("tools schema已传", tool_call_entry["tools"] is not None and len(tool_call_entry["tools"]) > 0)
+    check("tools含get_weather", tool_call_entry["tools"][0]["function"]["name"] == "get_weather")
 
     await agent.destroy()
 
@@ -312,11 +319,13 @@ async def test_multi_tool_chain() -> None:
     print("\n=== Test 5: 多工具链式调用 ===")
 
     mock_llm = MockLLMClient([
-        # 第1次: 调用 get_weather
+        # self_check 消耗第 1 次调用
+        make_self_check_response(),
+        # 第2次: 调用 get_weather
         make_tool_call_response("get_weather", {"city": "上海"}, "call_001"),
-        # 第2次: 调用 calculate
+        # 第3次: 调用 calculate
         make_tool_call_response("calculate", {"expression": "28 + 5"}, "call_002"),
-        # 第3次: 最终回复
+        # 第4次: 最终回复
         make_text_response("上海气温28°C，加5度后是33°C。"),
     ])
 
@@ -337,7 +346,7 @@ async def test_multi_tool_chain() -> None:
     result = await agent.run("上海气温加5度是多少？")
     check("任务成功", result.success)
     check("迭代3次", result.iterations == 3, f"got: {result.iterations}")
-    check("LLM调用3次", mock_llm._call_count == 3)
+    check("LLM调用4次(self_check+2tool+reply)", mock_llm._call_count == 4)
 
     # conversation 应有: system + user + (assistant_tc + tool) × 2 + assistant_final = 7
     conv = agent._conversation

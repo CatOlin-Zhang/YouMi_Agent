@@ -1,0 +1,466 @@
+{
+  "sessions": [
+    {
+      "session_id": "sess_af39f0b4ec9d",
+      "type": "single",
+      "name": "单聊",
+      "owner_agent_id": "dce090a3a1874685",
+      "member_ids": [
+        "dce090a3a1874685"
+      ],
+      "created_at": 1787711131.7039587,
+      "updated_at": 1787711131.7039587
+    },
+    {
+      "session_id": "sess_bf1a991bf803",
+      "type": "group",
+      "name": "群聊",
+      "owner_agent_id": "0456abf58357417c",
+      "member_ids": [
+        "0456abf58357417c",
+        "91f55b5a86cc418e",
+        "0a98ffb1e19d40e9",
+        "1a90b3374eab4d88",
+        "059658b715654573",
+        "8dc1cd1dc921437d",
+        "41acf47df65c42fd",
+        "bf9cb4f3960d4e21",
+        "8ab6ef5020a6477b",
+        "8fb27cf693b948d9",
+        "f48aebcf5d104889"
+      ],
+      "created_at": 1787712604.843958,
+      "updated_at": 1787713260.4176354
+    },
+    {
+      "session_id": "sess_f09ab1725dd5",
+      "type": "group",
+      "name": "群聊",
+      "owner_agent_id": "146e591b29e54c9f",
+      "member_ids": [
+        "146e591b29e54c9f",
+        "2f8649747ed045b4"
+      ],
+      "created_at": 1787724638.7346234,
+      "updated_at": 1787724780.7010653
+    },
+    {
+      "session_id": "sess_69e141ca0dff",
+      "type": "group",
+      "name": "群聊",
+      "owner_agent_id": "4a54ae14a16f42af",
+      "member_ids": [
+        "4a54ae14a16f42af"
+      ],
+      "created_at": 1787726770.5175827,
+      "updated_at": 1787726846.5853841
+    }
+  ],
+  "cards": {
+    "db94024651634b2b": {
+      "agent_id": "db94024651634b2b",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "f8de1bded2ab46d9": {
+      "agent_id": "f8de1bded2ab46d9",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "e036f85e2d5f4528": {
+      "agent_id": "e036f85e2d5f4528",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "ceaac72f3a3a4ba9": {
+      "agent_id": "ceaac72f3a3a4ba9",
+      "name": "master",
+      "role": "master",
+      "color": "#5c940d",
+      "status": "idle",
+      "bio": "作为 master 参与群聊",
+      "task": ""
+    },
+    "020d98d2fda240c0": {
+      "agent_id": "020d98d2fda240c0",
+      "name": "tool_guardian",
+      "role": "tool_guardian",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "作为 tool_guardian 参与群聊",
+      "task": ""
+    },
+    "b7fc1767a3e447ab": {
+      "agent_id": "b7fc1767a3e447ab",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "e2fd4cc5b2114d0b": {
+      "agent_id": "e2fd4cc5b2114d0b",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "99941d12217b4fc1": {
+      "agent_id": "99941d12217b4fc1",
+      "name": "master",
+      "role": "master",
+      "color": "#0b7285",
+      "status": "idle",
+      "bio": "Manage and monitor the project's workflow.",
+      "task": ""
+    },
+    "585add594f2b429e": {
+      "agent_id": "585add594f2b429e",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "eda469504f3447a2": {
+      "agent_id": "eda469504f3447a2",
+      "name": "coder",
+      "role": "coder",
+      "color": "#364fc7",
+      "status": "idle",
+      "bio": "编写能够输出自动化智能家居命令的代码。",
+      "task": ""
+    },
+    "7ed7c9a705a94680": {
+      "agent_id": "7ed7c9a705a94680",
+      "name": "reviewer",
+      "role": "reviewer",
+      "color": "#5c940d",
+      "status": "idle",
+      "bio": "审查代码是否符合要求。",
+      "task": ""
+    },
+    "60b4a42539f8490f": {
+      "agent_id": "60b4a42539f8490f",
+      "name": "researcher",
+      "role": "researcher",
+      "color": "#e8590c",
+      "status": "idle",
+      "bio": "调研现有的智能家居自动化解决方案。",
+      "task": ""
+    },
+    "58d729c6bffe4314": {
+      "agent_id": "58d729c6bffe4314",
+      "name": "researcher",
+      "role": "researcher",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "调研现有的智能家居自动化解决方案并汇总结果。",
+      "task": ""
+    },
+    "89d251bcfc784699": {
+      "agent_id": "89d251bcfc784699",
+      "name": "master",
+      "role": "master",
+      "color": "#0b7285",
+      "status": "idle",
+      "bio": "作为 master 参与群聊",
+      "task": ""
+    },
+    "1af76a89ffa440aa": {
+      "agent_id": "1af76a89ffa440aa",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "71254fed01b54781": {
+      "agent_id": "71254fed01b54781",
+      "name": "coder",
+      "role": "coder",
+      "color": "#1864ab",
+      "status": "idle",
+      "bio": "编写实现自动化智能家居命令集的代码。",
+      "task": ""
+    },
+    "9fb2f41383854966": {
+      "agent_id": "9fb2f41383854966",
+      "name": "reviewer",
+      "role": "reviewer",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "审查由 coder 创建的代码逻辑，确保其符合要求。",
+      "task": ""
+    },
+    "cf7983808c594fa9": {
+      "agent_id": "cf7983808c594fa9",
+      "name": "coder",
+      "role": "coder",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "编写实现自动化智能家居命令集的详细完整逻辑。",
+      "task": ""
+    },
+    "8421c182b6044b45": {
+      "agent_id": "8421c182b6044b45",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "d09269acc4e145d2": {
+      "agent_id": "d09269acc4e145d2",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "c33f218bedaa48ed": {
+      "agent_id": "c33f218bedaa48ed",
+      "name": "general",
+      "role": "general",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "b2fa08c05d1f47ff": {
+      "agent_id": "b2fa08c05d1f47ff",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "321f61f7e4984aa4": {
+      "agent_id": "321f61f7e4984aa4",
+      "name": "general",
+      "role": "general",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "5624e19e05f84cc7": {
+      "agent_id": "5624e19e05f84cc7",
+      "name": "reviewer",
+      "role": "reviewer",
+      "color": "#c2255c",
+      "status": "idle",
+      "bio": "审查下面这段智能家居命令集合体的 Python 代码,判断是否符合需求规范,并给出明确的审查结论和改进建议。\n\n【项目背景】\n这是一个智能家居自动化命令集合体项目,需要支持多设备类型、场景联动、命令序列化与筛选。\n\n【审查的代码】\n\n===== commands.py =====\nfrom dataclasses import dataclass, field, asdict\nfrom datetime import datetime\nfrom enum import Enum\nfrom typing import Any, Dict, Optional\n\nclass DeviceType(str, Enum):\n    LIGHT = \"light\"\n    AC = \"ac\"\n    CURTAIN = \"curtain\"\n    LOCK = \"lock\"\n    SPEAKER = \"speaker\"\n    VACUUM = \"vacuum\"\n    CAMERA = \"camera\"\n\nclass Action(str, Enum):\n    ON = \"on\"\n    OFF = \"off\"\n    SET_TEMPERATURE = \"set_temperature\"\n    SET_BRIGHTNESS = \"set_brightness\"\n    SET_COLOR = \"set_color\"\n    OPEN = \"open\"\n    CLOSE = \"close\"\n    LOCK = \"lock\"\n    UNLOCK = \"unlock\"\n    PLAY = \"play\"\n    PAUSE = \"pause\"\n    START_CLEAN = \"start_clean\"\n    STOP_CLEAN = \"stop_clean\"\n\n@dataclass\nclass Command:\n    device_id: str\n    device_type: DeviceType\n    action: Action\n    params: Dict[str, Any] = field(default_factory=dict)\n    scene: Optional[str] = None\n    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())\n\n    def to_dict(self):\n        d = asdict(self)\n        d[\"device_type\"] = self.device_type.value\n        d[\"action\"] = self.action.value\n        return d\n\n    def execute(self):\n        param_str = \", \".join(f\"{k}={v}\" for k, v in self.params.items())\n        scene_tag = f\"[{self.scene}] \" if self.scene else \"\"\n        return f\"{scene_tag}→ 设备 {self.device_id}({self.device_type.value}) 执行动作: {self.action.value}({param_str}) @ {self.timestamp}\"\n\n===== command_set.py =====\nimport json\nfrom typing import List\nfrom commands import Command, DeviceType\n\nclass CommandSet:\n    def __init__(self, name=\"default\"):\n        self.name = name\n        self._commands = []\n\n    def add_command(self, cmd):\n        self._commands.append(cmd)\n        return self\n\n    def add_commands(self, cmds):\n        self._commands.extend(cmds)\n        return self\n\n    def filter_by_device(self, device_type):\n        result = CommandSet(f\"{self.name}-{device_type.value}\")\n        result._commands = [c for c in self._commands if c.device_type == device_type]\n        return result\n\n    def filter_by_scene(self, scene):\n        result = CommandSet(f\"{self.name}-{scene}\")\n        result._commands = [c for c in self._commands if c.scene == scene]\n        return result\n\n    def all(self):\n        return list(self._commands)\n\n    def __len__(self):\n        return len(self._commands)\n\n    def to_json(self, indent=2):\n        return json.dumps({\n            \"set_name\": self.name,\n            \"count\": len(self._commands),\n            \"commands\": [c.to_dict() for c in self._commands],\n        }, ensure_ascii=False, indent=indent)\n\n    @classmethod\n    def from_json(cls, data):\n        obj = json.loads(data)\n        cs = cls(obj.get(\"set_name\", \"default\"))\n        for item in obj.get(\"commands\", []):\n            cs.add_command(Command(\n                device_id=item[\"device_id\"],\n                device_type=DeviceType(item[\"device_type\"]),\n                action=item[\"action\"],\n                params=item.get(\"params\", {}),\n                scene=item.get(\"scene\"),\n                timestamp=item.get(\"timestamp\"),\n            ))\n        return cs\n\n    def execute_all(self):\n        logs = []\n        print(f\"\\n========== 执行命令集合: {self.name} (共 {len(self._commands)} 条) ==========\")\n        for cmd in self._commands:\n            log = cmd.execute()\n            print(log)\n            logs.append(log)\n        print(\"=\" * 60)\n        return logs\n\n===== scenes.py =====\nfrom commands import Command, DeviceType, Action\nfrom command_set import CommandSet\n\ndef home_scene():\n    cs = CommandSet(\"home_scene\")\n    cs.add_commands([\n        Command(\"light_living\",  DeviceType.LIGHT,   Action.ON, {\"brightness\": 80, \"color\": \"warm\"},  scene=\"回家\"),\n        Command(\"light_entry\",   DeviceType.LIGHT,   Action.ON, {\"brightness\": 60},                    scene=\"回家\"),\n        Command(\"ac_bedroom\",    DeviceType.AC,      Action.SET_TEMPERATURE, {\"temperature\": 24, \"mode\": \"cool\"},   scene=\"回家\"),\n        Command(\"curtain_living\",DeviceType.CURTAIN, Action.OPEN, {\"percentage\": 100},                 scene=\"回家\"),\n        Command(\"speaker_living\",DeviceType.SPEAKER, Action.PLAY, {\"playlist\": \"欢迎回家\", \"volume\": 40}, scene=\"回家\"),\n    ])\n    return cs\n\ndef sleep_scene():\n    cs = CommandSet(\"sleep_scene\")\n    cs.add_commands([\n        Command(\"light_all\",      DeviceType.LIGHT,   Action.OFF, {}, scene=\"睡眠\"),\n        Command(\"ac_bedroom\",     DeviceType.AC,      Action.SET_TEMPERATURE, {\"temperature\": 26, \"mode\": \"sleep\"}, scene=\"睡眠\"),\n        Command(\"curtain_bedroom\",DeviceType.CURTAIN, Action.CLOSE, {\"percentage\": 0}, scene=\"睡眠\"),\n        Command(\"lock_front\",     DeviceType.LOCK,    Action.LOCK, {}, scene=\"睡眠\"),\n    ])\n    return cs\n\ndef away_scene():\n    cs = CommandSet(\"away_scene\")\n    cs.add_commands([\n        Command(\"light_all\",     DeviceType.LIGHT,   Action.OFF, {}, scene=\"离家\"),\n        Command(\"ac_all\",        DeviceType.AC,      Action.OFF, {}, scene=\"离家\"),\n        Command(\"curtain_all\",   DeviceType.CURTAIN, Action.CLOSE, {\"percentage\": 0}, scene=\"离家\"),\n        Command(\"lock_front\",    DeviceType.LOCK,    Action.LOCK, {}, scene=\"离家\"),\n        Command(\"vacuum_living\", DeviceType.VACUUM,  Action.START_CLEAN, {\"mode\": \"full\", \"water\": True}, scene=\"离家\"),\n        Command(\"camera_front\",  DeviceType.CAMERA,  Action.ON, {\"mode\": \"monitoring\"}, scene=\"离家\"),\n    ])\n    return cs\n\nSCENES = {\"home\": home_scene, \"sleep\": sleep_scene, \"away\": away_scene}\n\n===== main.py =====\nfrom scenes import SCENES\nfrom command_set import CommandSet, DeviceType\n\ndef main():\n    print(\"🏠 智能家居自动化命令集合体 演示\\n\")\n    home  = SCENES[\"home\"]()\n    sleep = SCENES[\"sleep\"]()\n    away  = SCENES[\"away\"]()\n    print(f\"回家模式: {len(home)} 条命令\")\n    print(f\"睡眠模式: {len(sleep)} 条命令\")\n    print(f\"离家模式: {len(away)} 条命令\")\n    total = CommandSet(\"all_scenes\")\n    total.add_commands(home.all() + sleep.all() + away.all())\n    print(f\"\\n合并后总命令数: {len(total)}\")\n    home.execute_all()\n    print(\"\\n📌 筛选: 所有灯光类命令\")\n    lights = total.filter_by_device(DeviceType.LIGHT)\n    for cmd in lights.all():\n        print(\"  -\", cmd.execute())\n    print(\"\\n📌 筛选: 离家场景命令\")\n    for cmd in total.filter_by_scene(\"离家\").all():\n        print(\"  -\", cmd.execute())\n    print(\"\\n📌 离家模式 JSON 输出:\")\n    print(away.to_json())\n    print(\"\\n📌 JSON 反序列化测试\")\n    restored = CommandSet.from_json(away.to_json())\n    print(f\"还原后命令数: {len(restored)},集合名: {restored.name}\")\n\nif __name__ == \"__main__\":\n    main()\n\n【原始需求清单】\n1. 命令数据结构 Command 需包含:device_id, device_type(枚举), action, params, timestamp, scene\n2. CommandSet 类提供:add_command, add_commands, to_json, from_json, filter_by_device, filter_by_scene, execute_all\n3. 三个内置场景:回家模式(灯亮、空调 24°C、窗帘打开、播放音乐)、睡眠模式(灯灭、空调 26°C、窗帘关闭、门锁上锁)、离家模式(所有设备关闭、扫地机器人启动、门锁上锁)\n4. main 入口演示生成三个场景并输出 JSON\n\n【审查要求】\n请逐项检查代码,给出:\n1. 需求覆盖率打分(每项需求是否实现,1-10分)\n2. 发现的 Bug 或潜在问题(尤其是 from_json 中 action 字段是字符串而非 Action 枚举、Brightness 在 to_dict 中可能丢失等)\n3. 代码规范问题(类型注解、注释、可维护性)\n4. 场景合理性评估(三个场景的命令是否符合真实使用逻辑)\n5. 最终结论:通过 / 有条件通过 / 不通过,以及 TOP 3 改进建议\n\n请使用结构化输出,给出专业的审查报告。",
+      "task": ""
+    },
+    "0e4703e8ff084c8e": {
+      "agent_id": "0e4703e8ff084c8e",
+      "name": "reviewer",
+      "role": "reviewer",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "【最终验收任务】审查以下代码并给出验收意见。\n\n【审查范围】\n1. commands.py(数据模型)\n2. command_set.py(命令集合)\n3. scenes.py(三个场景)\n4. main.py(入口演示)\n5. tests/test_command_set.py(单元测试)\n\n【核心验收点】\nA. P0 Bug 修复:`from_json` 中 `action=Action(item[\"action\"])` 是否已正确转换为枚举\nB. 单元测试文件 tests/test_command_set.py 是否存在语法错误,尤其检查:\n   - 多 assert 是否写在同一行(会触发 SyntaxError)\n   - def 函数定义之间是否有正确换行\n   - `test_json_roundtrip_preserves_action_enum` 的最后一行 `assert isinstance(restored[0].action, Action)def test_json_roundtrip_preserves_device_type_enum():` 是否缺少换行\nC. 场景逻辑顺序是否合理(回家:解锁→灯→空调→窗帘→音乐;离家:锁→关灯→关空调→关帘→扫地→摄像头)\nD. 类型注解、docstring 是否完整\n\n【完整代码】\n\n=== commands.py ===\nfrom __future__ import annotations\nfrom dataclasses import dataclass, field, asdict\nfrom datetime import datetime\nfrom enum import Enum\nfrom typing import Any, Dict, Optional\n\n__all__ = [\"DeviceType\", \"Action\", \"Command\"]\n\nclass DeviceType(str, Enum):\n    LIGHT = \"light\"; AC = \"ac\"; CURTAIN = \"curtain\"; LOCK = \"lock\"\n    SPEAKER = \"speaker\"; VACUUM = \"vacuum\"; CAMERA = \"camera\"\n\nclass Action(str, Enum):\n    ON = \"on\"; OFF = \"off\"\n    SET_TEMPERATURE = \"set_temperature\"\n    SET_BRIGHTNESS = \"set_brightness\"\n    SET_COLOR = \"set_color\"\n    OPEN = \"open\"; CLOSE = \"close\"\n    LOCK = \"lock\"; UNLOCK = \"unlock\"\n    PLAY = \"play\"; PAUSE = \"pause\"\n    START_CLEAN = \"start_clean\"; STOP_CLEAN = \"stop_clean\"\n\n@dataclass\nclass Command:\n    device_id: str\n    device_type: DeviceType\n    action: Action\n    params: Dict[str, Any] = field(default_factory=dict)\n    scene: Optional[str] = None\n    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())\n\n    def to_dict(self) -> Dict[str, Any]:\n        d = asdict(self)\n        d[\"device_type\"] = self.device_type.value\n        d[\"action\"] = self.action.value\n        return d\n\n    def execute(self) -> str:\n        param_str = \", \".join(f\"{k}={v}\" for k, v in self.params.items())\n        scene_tag = f\"[{self.scene}] \" if self.scene else \"\"\n        detail = f\"{self.action.value}({param_str})\" if param_str else self.action.value\n        return f\"{scene_tag}→ 设备 {self.device_id}({self.device_type.value}) 执行动作: {detail} @ {self.timestamp}\"\n\n=== command_set.py ===\nfrom __future__ import annotations\nimport json\nfrom datetime import datetime\nfrom typing import Iterable, Iterator, List\n\nfrom commands import Action, Command, DeviceType\n\n__all__ = [\"CommandSet\"]\n\nclass CommandSet:\n    def __init__(self, name: str = \"default\") -> None:\n        self.name = name\n        self._commands: List[Command] = []\n\n    def add_command(self, cmd: Command) -> \"CommandSet\":\n        self._commands.append(cmd); return self\n\n    def add_commands(self, cmds: Iterable[Command]) -> \"CommandSet\":\n        self._commands.extend(cmds); return self\n\n    def filter_by_device(self, device_type: DeviceType) -> \"CommandSet\":\n        result = CommandSet(f\"{self.name}-{device_type.value}\")\n        result._commands = [c for c in self._commands if c.device_type == device_type]\n        return result\n\n    def filter_by_scene(self, scene: str) -> \"CommandSet\":\n        result = CommandSet(f\"{self.name}-{scene}\")\n        result._commands = [c for c in self._commands if c.scene == scene]\n        return result\n\n    def all(self) -> List[Command]: return list(self._commands)\n\n    def __len__(self) -> int: return len(self._commands)\n    def __iter__(self) -> Iterator[Command]: return iter(self._commands)\n    def __getitem__(self, idx: int) -> Command: return self._commands[idx]\n\n    def to_json(self, indent: int = 2) -> str:\n        return json.dumps({\n            \"set_name\": self.name,\n            \"count\": len(self._commands),\n            \"commands\": [c.to_dict() for c in self._commands],\n        }, ensure_ascii=False, indent=indent)\n\n    @classmethod\n    def from_json(cls, data: str) -> \"CommandSet\":\n        obj = json.loads(data)\n        cs = cls(obj.get(\"set_name\", \"default\"))\n        for item in obj.get(\"commands\", []):\n            cs.add_command(Command(\n                device_id=item[\"device_id\"],\n                device_type=DeviceType(item[\"device_type\"]),\n                action=Action(item[\"action\"]),\n                params=item.get(\"params\", {}),\n                scene=item.get(\"scene\"),\n                timestamp=item.get(\"timestamp\") or datetime.now().isoformat(),\n            ))\n        return cs\n\n    def execute_all(self) -> List[str]:\n        logs: List[str] = []\n        print(f\"\\n========== 执行命令集合: {self.name} (共 {len(self._commands)} 条) ==========\")\n        for cmd in self._commands:\n            log = cmd.execute(); print(log); logs.append(log)\n        print(\"=\" * 60)\n        return logs\n\n=== scenes.py ===\nfrom __future__ import annotations\nfrom commands import Action, Command, DeviceType\nfrom command_set import CommandSet\n\n__all__ = [\"home_scene\", \"sleep_scene\", \"away_scene\", \"SCENES\"]\n\ndef home_scene() -> CommandSet:\n    cs = CommandSet(\"home_scene\")\n    cs.add_commands([\n        Command(\"lock_front\",     DeviceType.LOCK,    Action.UNLOCK, {}, scene=\"回家\"),\n        Command(\"light_entry\",    DeviceType.LIGHT,   Action.ON, {\"brightness\": 60}, scene=\"回家\"),\n        Command(\"light_living\",   DeviceType.LIGHT,   Action.ON, {\"brightness\": 80, \"color\": \"warm\"}, scene=\"回家\"),\n        Command(\"ac_bedroom\",     DeviceType.AC,      Action.SET_TEMPERATURE, {\"temperature\": 24, \"mode\": \"cool\"}, scene=\"回家\"),\n        Command(\"curtain_living\", DeviceType.CURTAIN, Action.OPEN, {\"percentage\": 100}, scene=\"回家\"),\n        Command(\"speaker_living\", DeviceType.SPEAKER, Action.PLAY, {\"playlist\": \"欢迎回家\", \"volume\": 40}, scene=\"回家\"),\n    ])\n    return cs\n\ndef sleep_scene() -> CommandSet:\n    cs = CommandSet(\"sleep_scene\")\n    cs.add_commands([\n        Command(\"light_all\",       DeviceType.LIGHT,   Action.OFF, {}, scene=\"睡眠\"),\n        Command(\"ac_bedroom\",      DeviceType.AC,      Action.SET_TEMPERATURE, {\"temperature\": 26, \"mode\": \"sleep\"}, scene=\"睡眠\"),\n        Command(\"curtain_bedroom\", DeviceType.CURTAIN, Action.CLOSE, {\"percentage\": 0}, scene=\"睡眠\"),\n        Command(\"lock_front\",      DeviceType.LOCK,    Action.LOCK, {}, scene=\"睡眠\"),\n    ])\n    return cs\n\ndef away_scene() -> CommandSet:\n    cs = CommandSet(\"away_scene\")\n    cs.add_commands([\n        Command(\"lock_front\",    DeviceType.LOCK,    Action.LOCK, {}, scene=\"离家\"),\n        Command(\"light_all\",     DeviceType.LIGHT,   Action.OFF, {}, scene=\"离家\"),\n        Command(\"ac_all\",        DeviceType.AC,      Action.OFF, {}, scene=\"离家\"),\n        Command(\"curtain_all\",   DeviceType.CURTAIN, Action.CLOSE, {\"percentage\": 0}, scene=\"离家\"),\n        Command(\"vacuum_living\", DeviceType.VACUUM,  Action.START_CLEAN, {\"mode\": \"full\", \"water\": True}, scene=\"离家\"),\n        Command(\"camera_front\",  DeviceType.CAMERA,  Action.ON, {\"mode\": \"monitoring\"}, scene=\"离家\"),\n    ])\n    return cs\n\nSCENES = {\"home\": home_scene, \"sleep\": sleep_scene, \"away\": away_scene}\n\n=== main.py ===\nfrom __future__ import annotations\nfrom command_set import CommandSet, DeviceType\nfrom scenes import SCENES\n\ndef main() -> None:\n    print(\"🏠 智能家居自动化命令集合体 演示\\n\")\n    home, sleep, away = SCENES[\"home\"](), SCENES[\"sleep\"](), SCENES[\"away\"]()\n    print(f\"回家模式: {len(home)} 条命令\")\n    print(f\"睡眠模式: {len(sleep)} 条命令\")\n    print(f\"离家模式: {len(away)} 条命令\")\n\n    total = CommandSet(\"all_scenes\")\n    total.add_commands(home.all() + sleep.all() + away.all())\n    print(f\"\\n合并后总命令数: {len(total)}\")\n\n    home.execute_all()\n\n    print(\"\\n📌 筛选: 所有灯光类命令\")\n    for cmd in total.filter_by_device(DeviceType.LIGHT):\n        print(\"  -\", cmd.execute())\n\n    print(\"\\n📌 筛选: 离家场景命令\")\n    for cmd in total.filter_by_scene(\"离家\"):\n        print(\"  -\", cmd.execute())\n\n    print(\"\\n📌 离家模式 JSON 输出:\")\n    print(away.to_json())\n\n    print(\"\\n📌 JSON 反序列化测试\")\n    restored = CommandSet.from_json(away.to_json())\n    print(f\"还原后命令数: {len(restored)}, 集合名: {restored.name}\")\n    restored.execute_all()\n\nif __name__ == \"__main__\":\n    main()\n\n=== tests/test_command_set.py ===\nimport pytest\nfrom commands import Action, Command, DeviceType\nfrom command_set import CommandSet\n\ndef make_sample() -> CommandSet:\n    cs = CommandSet(\"test\")\n    cs.add_command(Command(\"d1\", DeviceType.LIGHT, Action.ON, {\"b\": 80}, scene=\"回家\"))\n    cs.add_command(Command(\"d2\", DeviceType.AC,    Action.SET_TEMPERATURE, {\"t\": 24}, scene=\"回家\"))\n    cs.add_command(Command(\"d3\", DeviceType.LOCK,  Action.LOCK, scene=\"离家\"))\n    return cs\n\ndef test_add_and_len():\n    cs = make_sample()\n    assert len(cs) == 3\n\ndef test_filter_by_device():\n    cs = make_sample()\n    lights = cs.filter_by_device(DeviceType.LIGHT)\n    assert len(lights) == 1\n    assert lights[0].device_id == \"d1\"\n\ndef test_filter_by_scene():\n    cs = make_sample()\n    assert len(cs.filter_by_scene(\"回家\")) == 2\n    assert len(cs.filter_by_scene(\"离家\")) == 1\n\ndef test_json_roundtrip_preserves_action_enum():\n    cs = make_sample()\n    restored = CommandSet.from_json(cs.to_json())\n    assert len(restored) == 3\n    assert restored[0].action == Action.ON\n    assert restored[0].action.value == \"on\"\n    assert isinstance(restored[0].action, Action) # 类型断言def test_json_roundtrip_preserves_device_type_enum():\n    cs = make_sample()\n    restored = CommandSet.from_json(cs.to_json())\n    assert isinstance(restored[1].device_type, DeviceType)\n    assert restored[1].device_type == DeviceType.AC\n\ndef test_execute_all_returns_logs():\n    cs = make_sample()\n    logs = cs.execute_all()\n    assert len(logs) == 3\n    assert all(isinstance(x, str) for x in logs)\n\ndef test_iter_and_getitem():\n    cs = make_sample()\n    assert [c.device_id for c in cs] == [\"d1\", \"d2\", \"d3\"]\n    assert cs[0].device_id == \"d1\"\n\n【交付要求】\n1. 明确指出 tests/test_command_set.py 中存在的具体语法错误位置(行)\n2. 给出修复后的完整测试文件\n3. 重新评估整体质量(1-10分)\n4. 给出最终验收结论:通过 / 有条件通过 / 不通过\n\n直接给出验收报告,无需调用其他工具。",
+      "task": ""
+    },
+    "dce090a3a1874685": {
+      "agent_id": "dce090a3a1874685",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "87ffab5d913d4006": {
+      "agent_id": "87ffab5d913d4006",
+      "name": "tool_guardian",
+      "role": "tool_guardian",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "创建一个智能家居自然语言指令转换系统，需求如下：\n\n1. 系统功能：\n- 接收用户的自然语言输入（如\"我回家了，把客厅灯打开\"）\n- 解析语义意图，识别设备、操作、参数、场景\n- 输出标准化的 JSON 格式指令\n\n2. 支持的设备类型：\n- light（灯）：操作包括 on/off/toggle/brightness/color\n- air_conditioner（空调）：操作包括 on/off/temperature/mode（cool/heat/auto）\n- curtain（窗帘）：操作包括 open/close/stop/position（0-100）\n- speaker（音响）：操作包括 play/pause/next/prev/volume\n- lock（门锁）：操作包括 lock/unlock\n- camera（摄像头）：操作包括 on/off/record\n- sensor（传感器）：操作包括 read\n\n3. 房间支持：\n- living_room（客厅）、bedroom（卧室）、kitchen（厨房）、bathroom（卫生间）、study（书房）、master_bedroom（主卧）\n\n4. 标准化输出格式：\n```json\n{\n  \"intent\": \"device_control | scene_control | query\",\n  \"actions\": [\n    {\n      \"device_type\": \"light\",\n      \"device_id\": \"living_room_main_light\",\n      \"room\": \"living_room\",\n      \"action\": \"on\",\n      \"parameters\": {}\n    }\n  ],\n  \"raw_text\": \"原始输入文本\",\n  \"timestamp\": \"ISO时间\"\n}\n```\n\n5. 实现要求：\n- 提供一个 Python 类 SmartHomeNLP，接收 text 参数，输出标准化指令 dict\n- 实现关键词映射字典（中英文都支持）\n- 支持复合指令（如\"打开客厅灯并把空调调到24度\"）\n- 支持场景模式（如\"我回家了\"、\"我出门了\"、\"睡觉了\"、\"起床了\"对应预设场景）\n- 包含一个测试函数，覆盖至少 10 个测试用例\n\n请直接在终端创建一个名为 smart_home_nlp.py 的文件并写入完整代码，然后运行测试函数验证结果。",
+      "task": ""
+    },
+    "343071fa18774540": {
+      "agent_id": "343071fa18774540",
+      "name": "tool_guardian",
+      "role": "tool_guardian",
+      "color": "#1864ab",
+      "status": "idle",
+      "bio": "在当前工作目录下创建文件 smart_home_nlp.py，内容为以下完整 Python 代码（请直接写入文件，不要做任何修改或裁剪）：\n\n```python\n\"\"\"\nSmart Home NLP - 自然语言转标准化指令系统\n\"\"\"\nimport re\nimport json\nfrom datetime import datetime\nfrom typing import List, Dict, Optional\n\n\nclass SmartHomeNLP:\n    # 房间映射\n    ROOM_MAP = {\n        \"客厅\": \"living_room\", \"living room\": \"living_room\", \"livingroom\": \"living_room\",\n        \"卧室\": \"bedroom\", \"bedroom\": \"bedroom\",\n        \"主卧\": \"master_bedroom\", \"master bedroom\": \"master_bedroom\",\n        \"厨房\": \"kitchen\", \"kitchen\": \"kitchen\",\n        \"卫生间\": \"bathroom\", \"厕所\": \"bathroom\", \"bathroom\": \"bathroom\", \"toilet\": \"bathroom\",\n        \"书房\": \"study\", \"study\": \"study\",\n    }\n\n    # 设备类型映射\n    DEVICE_MAP = {\n        \"灯\": \"light\", \"灯光\": \"light\", \"light\": \"light\", \"lights\": \"light\", \"lamp\": \"light\",\n        \"空调\": \"air_conditioner\", \"ac\": \"air_conditioner\", \"air conditioner\": \"air_conditioner\",\n        \"窗帘\": \"curtain\", \"curtain\": \"curtain\", \"curtains\": \"curtain\",\n        \"音响\": \"speaker\", \"音箱\": \"speaker\", \"speaker\": \"speaker\", \"music\": \"speaker\", \"音乐\": \"speaker\",\n        \"门锁\": \"lock\", \"锁\": \"lock\", \"lock\": \"lock\",\n        \"摄像头\": \"camera\", \"camera\": \"camera\", \"监控\": \"camera\",\n        \"传感器\": \"sensor\", \"sensor\": \"sensor\", \"温度\": \"sensor\", \"湿度\": \"sensor\",\n    }\n\n    # 操作映射\n    ACTION_MAP = {\n        # 灯\n        \"打开\": \"on\", \"开\": \"on\", \"开一下\": \"on\", \"on\": \"on\", \"turn on\": \"on\",\n        \"关闭\": \"off\", \"关\": \"off\", \"关掉\": \"off\", \"off\": \"off\", \"turn off\": \"off\",\n        \"切换\": \"toggle\", \"toggle\": \"toggle\",\n        \"调亮\": \"brightness_up\", \"调暗\": \"brightness_down\",\n        # 空调\n        \"调高\": \"temperature_up\", \"调低\": \"temperature_down\", \"升温\": \"temperature_up\", \"降温\": \"temperature_down\",\n        \"制冷\": \"mode_cool\", \"制热\": \"mode_heat\", \"自动\": \"mode_auto\",\n        # 窗帘\n        \"拉上\": \"close\", \"拉开\": \"open\", \"打开\": \"open\", \"关闭\": \"close\",\n        \"停止\": \"stop\", \"stop\": \"stop\",\n        # 音响\n        \"播放\": \"play\", \"play\": \"play\",\n        \"暂停\": \"pause\", \"pause\": \"pause\",\n        \"下一首\": \"next\", \"上一首\": \"prev\", \"next\": \"next\", \"prev\": \"prev\",\n        # 门锁\n        \"锁上\": \"lock\", \"解锁\": \"unlock\", \"上锁\": \"lock\",\n        # 摄像头\n        \"录像\": \"record\", \"record\": \"record\",\n    }\n\n    # 场景映射\n    SCENE_MAP = {\n        \"回家了\": \"come_home\", \"我回来了\": \"come_home\", \"到家了\": \"come_home\", \"come home\": \"come_home\",\n        \"出门了\": \"leave_home\", \"我走了\": \"leave_home\", \"出门\": \"leave_home\", \"leave\": \"leave_home\",\n        \"睡觉了\": \"sleep\", \"我要睡了\": \"sleep\", \"休息了\": \"sleep\", \"sleep\": \"sleep\", \"晚安\": \"sleep\",\n        \"起床了\": \"wake_up\", \"早安\": \"wake_up\", \"醒了\": \"wake_up\", \"wake up\": \"wake_up\",\n        \"看电影\": \"movie_mode\", \"movie\": \"movie_mode\", \"观影\": \"movie_mode\",\n        \"会客\": \"guest_mode\", \"有客人\": \"guest_mode\",\n    }\n\n    # 场景预设\n    SCENE_PRESETS = {\n        \"come_home\": [\n            {\"device_type\": \"light\", \"device_id\": \"living_room_main_light\", \"room\": \"living_room\", \"action\": \"on\", \"parameters\": {\"brightness\": 80}},\n            {\"device_type\": \"air_conditioner\", \"device_id\": \"living_room_ac\", \"room\": \"living_room\", \"action\": \"on\", \"parameters\": {\"temperature\": 24, \"mode\": \"cool\"}},\n            {\"device_type\": \"curtain\", \"device_id\": \"living_room_curtain\", \"room\": \"living_room\", \"action\": \"open\", \"parameters\": {}},\n        ],\n        \"leave_home\": [\n            {\"device_type\": \"light\", \"device_id\": \"all\", \"room\": \"all\", \"action\": \"off\", \"parameters\": {}},\n            {\"device_type\": \"air_conditioner\", \"device_id\": \"all\", \"room\": \"all\", \"action\": \"off\", \"parameters\": {}},\n            {\"device_type\": \"lock\", \"device_id\": \"front_door\", \"room\": \"entry\", \"action\": \"lock\", \"parameters\": {}},\n        ],\n        \"sleep\": [\n            {\"device_type\": \"light\", \"device_id\": \"all\", \"room\": \"all\", \"action\": \"off\", \"parameters\": {}},\n            {\"device_type\": \"air_conditioner\", \"device_id\": \"master_bedroom_ac\", \"room\": \"master_bedroom\", \"action\": \"on\", \"parameters\": {\"temperature\": 26, \"mode\": \"cool\"}},\n            {\"device_type\": \"lock\", \"device_id\": \"front_door\", \"room\": \"entry\", \"action\": \"lock\", \"parameters\": {}},\n            {\"device_type\": \"curtain\", \"device_id\": \"master_bedroom_curtain\", \"room\": \"master_bedroom\", \"action\": \"close\", \"parameters\": {}},\n        ],\n        \"wake_up\": [\n            {\"device_type\": \"curtain\", \"device_id\": \"master_bedroom_curtain\", \"room\": \"master_bedroom\", \"action\": \"open\", \"parameters\": {}},\n            {\"device_type\": \"light\", \"device_id\": \"master_bedroom_main_light\", \"room\": \"master_bedroom\", \"action\": \"on\", \"parameters\": {\"brightness\": 50}},\n        ],\n        \"movie_mode\": [\n            {\"device_type\": \"light\", \"device_id\": \"living_room_main_light\", \"room\": \"living_room\", \"action\": \"on\", \"parameters\": {\"brightness\": 20}},\n            {\"device_type\": \"curtain\", \"device_id\": \"living_room_curtain\", \"room\": \"living_room\", \"action\": \"close\", \"parameters\": {}},\n            {\"device_type\": \"speaker\", \"device_id\": \"living_room_speaker\", \"room\": \"living_room\", \"action\": \"play\", \"parameters\": {}},\n        ],\n        \"guest_mode\": [\n            {\"device_type\": \"light\", \"device_id\": \"living_room_main_light\", \"room\": \"living_room\", \"action\": \"on\", \"parameters\": {\"brightness\": 100}},\n        ],\n    }\n\n    # 数字映射\n    NUMBER_MAP = {\n        \"零\": 0, \"一\": 1, \"二\": 2, \"两\": 2, \"三\": 3, \"四\": 4, \"五\": 5,\n        \"六\": 6, \"七\": 7, \"八\": 8, \"九\": 9, \"十\": 10,\n    }\n\n    def __init__(self):\n        self.text = \"\"\n        self.actions: List[Dict] = []\n\n    def parse(self, text: str) -> Dict:\n        \"\"\"主解析入口\"\"\"\n        self.text = text.strip()\n        self.actions = []\n\n        # 1. 检查场景模式\n        scene = self._detect_scene(self.text)\n        if scene:\n            return {\n                \"intent\": \"scene_control\",\n                \"scene\": scene,\n                \"actions\": self.SCENE_PRESETS[scene],\n                \"raw_text\": self.text,\n                \"timestamp\": datetime.now().isoformat(),\n            }\n\n        # 2. 拆分复合指令（按 并、且、，、； 以及英文 , ; 分隔）\n        segments = re.split(r\"[，,；;]|\\s*并\\s*|\\s*且\\s*|\\s*然后\\s*\", self.text)\n        for seg in segments:\n            seg = seg.strip()\n            if not seg:\n                continue\n            action = self._parse_segment(seg)\n            if action:\n                self.actions.append(action)\n\n        # 3. 检测是否为查询\n        intent = \"query\" if self._is_query(self.text) else \"device_control\"\n\n        return {\n            \"intent\": intent,\n            \"actions\": self.actions,\n            \"raw_text\": self.text,\n            \"timestamp\": datetime.now().isoformat(),\n        }\n\n    def _detect_scene(self, text: str) -> Optional[str]:\n        for key, scene in self.SCENE_MAP.items():\n            if key in text:\n                return scene\n        return None\n\n    def _is_query(self, text: str) -> bool:\n        query_keywords = [\"多少\", \"几度\", \"怎么样\", \"状态\", \"温度\", \"湿度\", \"what\", \"how\", \"温度\"]\n        return any(kw in text for kw in query_keywords) and not self.actions\n\n    def _parse_segment(self, segment: str) -> Optional[Dict]:\n        \"\"\"解析单条指令段\"\"\"\n        room = self._extract_room(segment)\n        device_type = self._extract_device(segment)\n        action = self._extract_action(segment)\n        parameters = self._extract_parameters(segment, action, device_type)\n\n        if not device_type or not action:\n            return None\n\n        device_id = f\"{room}_{device_type}_main\" if room != \"unknown\" else f\"{device_type}_main\"\n\n        return {\n            \"device_type\": device_type,\n            \"device_id\": device_id,\n            \"room\": room,\n            \"action\": action,\n            \"parameters\": parameters,\n        }\n\n    def _extract_room(self, text: str) -> str:\n        for keyword, room in self.ROOM_MAP.items():\n            if keyword in text:\n                return room\n        return \"unknown\"\n\n    def _extract_device(self, text: str) -> Optional[str]:\n        # 按关键词长度倒序，避免短词优先匹配\n        for keyword in sorted(self.DEVICE_MAP.keys(), key=len, reverse=True):\n            if keyword in text:\n                return self.DEVICE_MAP[keyword]\n        return None\n\n    def _extract_action(self, text: str) -> Optional[str]:\n        for keyword in sorted(self.ACTION_MAP.keys(), key=len, reverse=True):\n            if keyword in text:\n                return self.ACTION_MAP[keyword]\n        return None\n\n    def _extract_parameters(self, text: str, action: Optional[str], device_type: Optional[str]) -> Dict:\n        params = {}\n\n        # 提取数字\n        nums = re.findall(r\"\\d+\", text)\n        chinese_nums = []\n        for cn, val in self.NUMBER_MAP.items():\n            if cn in text:\n                chinese_nums.append(val)\n        all_nums = [int(n) for n in nums] + chinese_nums\n\n        if not all_nums:\n            return params\n\n        num = all_nums[0]\n\n        # 根据设备和动作填充参数\n        if device_type == \"air_conditioner\" and action in (\"on\", \"mode_cool\", \"mode_heat\"):\n            if 16 <= num <= 30:\n                params[\"temperature\"] = num\n                params[\"mode\"] = \"cool\"\n\n        elif device_type == \"light\" and action == \"on\":\n            if 0 <= num <= 100:\n                params[\"brightness\"] = num\n\n        elif device_type == \"curtain\":\n            if action == \"open\":\n                params[\"position\"] = 100\n            elif action == \"close\":\n                params[\"position\"] = 0\n            elif 0 <= num <= 100:\n                params[\"position\"] = num\n\n        elif device_type == \"speaker\" and action == \"play\":\n            if 0 <= num <= 100:\n                params[\"volume\"] = num\n\n        return params\n\n\n# ============= 测试用例 =============\ndef run_tests():\n    nlp = SmartHomeNLP()\n    test_cases = [\n        \"把客厅灯打开\",\n        \"关闭卧室的灯\",\n        \"我回家了\",\n        \"打开客厅灯并把空调调到24度\",\n        \"把主卧空调温度调到26度\",\n        \"拉上卧室窗帘\",\n        \"我睡觉了\",\n        \"客厅音响播放音乐\",\n        \"锁上前门\",\n        \"打开厨房灯并关闭卫生间灯\",\n        \"把客厅窗帘拉开到80\",\n        \"早上好\",\n    ]\n\n    print(\"=\" * 80)\n    print(\"智能家居 NLP 测试\")\n    print(\"=\" * 80)\n    for i, text in enumerate(test_cases, 1):\n        result = nlp.parse(text)\n        print(f\"\\n[测试 {i}] 输入: {text}\")\n        print(json.dumps(result, ensure_ascii=False, indent=2))\n\n\nif __name__ == \"__main__\":\n    run_tests()\n```\n\n写入文件后，执行命令 `python3 smart_home_nlp.py` 运行测试，把完整输出返回给我。",
+      "task": ""
+    },
+    "0456abf58357417c": {
+      "agent_id": "0456abf58357417c",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "91f55b5a86cc418e": {
+      "agent_id": "91f55b5a86cc418e",
+      "name": "writer",
+      "role": "writer",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "",
+      "task": "为智能家居项目撰写一份《标准化指令规范文档》，要求：\n\n1. 设计一套清晰的 JSON 格式指令模板，包含字段：device（设备类型）、action（动作）、parameters（参数）、location（房间/区域，可选）、scene（场景，可选）、idempotent（幂等标记，可选）\n\n2. 定义常见的设备类型枚举：light（灯）、ac（空调）、curtain（窗帘）、speaker（音箱）、tv（电视）、fan（风扇）、robot_vacuum（扫地机器人）、lock（门锁）、camera（摄像头）、sensor（传感器）\n\n3. 定义每个设备支持的 action 列表（如 light: on/off/brightness/color_temp/color）\n\n4. 定义 parameters 的取值规范（如亮度 0-100，温度 16-30 等）\n\n5. 提供至少 6 个自然语言到标准化指令的转换示例（如\"把客厅灯调亮一点\"、\"睡觉模式\"、\"太冷了\"）\n\n6. 说明解析规则：如何从自然语言中识别设备、动作、参数、位置\n\n输出格式：使用 markdown，结构清晰，包含主模板、设备-动作对照表、参数范围说明、转换示例四部分。控制在 600 字以内。"
+    },
+    "0a98ffb1e19d40e9": {
+      "agent_id": "0a98ffb1e19d40e9",
+      "name": "writer",
+      "role": "writer",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "",
+      "task": "为已有的《智能家居标准化指令规范》补充一份《解析器验证与边界处理手册》，要求：\n\n1. 设计 5 条校验规则：设备-动作合法性、参数范围、必填字段、location 标准化（如\"主卧\"→master_bedroom）、scene 字典命中\n\n2. 提供 8 条边界场景处理方案：\n   - 模糊表达：\"有点暗\" / \"太冷了\" / \"稍微亮一点\" 的量化策略\n   - 冲突表达：\"开空调又关空调\"\n   - 缺省表达：\"把灯打开\"（无 location）\n   - 多设备表达：\"把所有灯关掉\"\n   - 否定表达：\"别开灯\"\n   - 上下文依赖：\"再亮一点\"（需记忆上一次亮度）\n   - 反讽/试探：\"这灯真亮\"（可能是反讽要关灯）\n   - 跨场景：\"睡觉模式但客厅留灯\"\n\n3. 设计一个 location 标准字典（客厅/卧室/主卧/厨房/卫生间/书房/阳台/玄关 → living_room/bedroom/master_bedroom/kitchen/bathroom/study/balcony/entryway）\n\n4. 给出错误码体系：E001 设备不存在 / E002 动作不匹配 / E003 参数越界 / E004 location 未知 / E005 scene 未定义\n\n输出 markdown，控制在 500 字以内，结构化清晰。"
+    },
+    "1a90b3374eab4d88": {
+      "agent_id": "1a90b3374eab4d88",
+      "name": "general",
+      "role": "general",
+      "color": "#9c36b5",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "059658b715654573": {
+      "agent_id": "059658b715654573",
+      "name": "smart_home_parser",
+      "role": "smart_home_parser",
+      "color": "#e8590c",
+      "status": "idle",
+      "bio": "",
+      "task": "你是一个智能家居自然语言指令解析器，负责将用户的自然语言需求转换为标准化 JSON 指令。\n\n## 主模板\n```json\n{\n  \"device\": \"light\",\n  \"action\": \"brightness\",\n  \"parameters\": { \"brightness\": 80 },\n  \"location\": \"客厅\",\n  \"scene\": \"sleep\",\n  \"idempotent\": true\n}\n```\n\n## 设备-动作映射\n- light: on / off / brightness (0-100) / color_temp (2700-6500K) / color / toggle\n- ac: on / off / mode (cool/heat/fan/dry/auto) / temperature (16-30) / fan_speed / swing\n- curtain: open / close / stop / position (0-100)\n- tv: on / off / channel / volume (0-100) / source\n- speaker: play / pause / volume / track\n- fan: on / off / speed (1-5)\n- robot_vacuum: start / pause / stop / return / mode\n- lock: lock / unlock\n- camera: snapshot / record\n\n## Location 标准字典\n客厅→living_room ｜ 主卧→master_bedroom ｜ 次卧→second_bedroom ｜ 厨房→kitchen ｜ 卫生间→bathroom ｜ 书房→study ｜ 阳台→balcony ｜ 玄关→entryway ｜ 餐厅→dining_room ｜ 走廊→corridor\n\n## 场景字典\n- sleep: 全灯关 + 窗帘关 + ac 26℃ + 风扇低速\n- away: 全设备关 + 扫地机器人 auto + 锁门\n- home: 玄关灯开 + 客厅灯 60 + ac 24℃ + 窗帘开\n- movie: 客厅灯 10 + tv on + 窗帘关\n- dinner: 餐厅灯 70 + 厨房灯 80 + 背景音乐\n- wake-up: 主卧窗帘开 + 灯渐亮 + 音乐\n\n## 解析规则\n1. 设备识别：名词关键词映射\n2. 位置识别：提取地点名词，缺省视为 living_room\n3. 动作识别：动词优先；模糊语义按规则换算（亮一点→brightness+20，太冷→ac +2℃ 切 heat）\n4. 数值提取：阿拉伯数字直接采用；相对表达按预设步长换算\n5. 否定语义（别/不要/不用）：动作取反\n6. 反讽（\"这灯真亮\"）：触发澄清反问\n7. 上下文继承（\"再亮一点\"/\"又觉得冷\"）：session 内增量调整\n\n## 边界处理\n- 模糊表达 \"有点暗/太冷\" → 当前值 ±10~30%\n- 指令冲突 → 取末条 + 输出 E006 告警\n- 缺省 location → 默认 living_room\n- 多设备 \"所有灯关掉\" → location 通配展开\n- 跨场景例外 \"睡觉留走廊灯\" → scene + location 例外排除\n\n## 错误码\nE001 设备不存在 ｜ E002 动作不匹配 ｜ E003 参数越界 ｜ E004 location 未知 ｜ E005 scene 未定义 ｜ E006 指令冲突\n\n## 输出要求\n每收到一条自然语言需求，立即输出：\n1. 标准 JSON 指令\n2. 简短解释（哪条规则命中）\n3. 错误码（如有）\n\n如果自然语言描述清晰、需求明确，无需反问，直接输出 JSON。\n如果存在歧义且影响执行，输出澄清问题列表。\n\n请直接处理用户后续发送的所有自然语言需求，不要等待额外确认。"
+    },
+    "8dc1cd1dc921437d": {
+      "agent_id": "8dc1cd1dc921437d",
+      "name": "smart_home_batch_demo",
+      "role": "smart_home_batch_demo",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "",
+      "task": "你是智能家居指令批量解析演示器。请针对以下 10 条自然语言需求，分别输出标准化 JSON 指令。\n\n【设备-动作映射】\n- light: on/off/brightness(0-100)/color_temp(2700-6500K)/color/toggle\n- ac: on/off/mode/temperature(16-30)/fan_speed/swing\n- curtain: open/close/stop/position(0-100)\n- tv: on/off/channel/volume(0-100)/source\n- robot_vacuum: start/pause/stop/return/mode\n- lock: lock/unlock\n- speaker: play/pause/volume/track\n\n【Location 标准字典】\n客厅→living_room ｜ 主卧→master_bedroom ｜ 次卧→second_bedroom ｜ 厨房→kitchen ｜ 卫生间→bathroom ｜ 书房→study ｜ 阳台→balcony ｜ 玄关→entryway ｜ 餐厅→dining_room ｜ 走廊→corridor\n\n【场景字典】\n- sleep → 多设备组合\n- away → 多设备组合\n- home → 多设备组合\n- movie → 多设备组合\n- dinner → 多设备组合\n\n【解析规则】\n- 模糊\"亮一点/亮一些\" → brightness +20\n- \"太冷了\" → ac mode=heat, temperature=26\n- \"太热了\" → ac mode=cool, temperature=24\n- 否定\"别/不要/不用\" → 动作取反\n- 数字直接采用\n- 缺省 location → living_room\n- 所有灯关掉 → 多 location 通配\n\n【输出格式】\n对每条需求输出：\n1. 标准 JSON 指令\n2. 命中规则说明\n\n【待解析需求清单】\n1. 把客厅灯调亮一点\n2. 卧室太热了，开空调\n3. 我要看电影\n4. 关闭所有灯\n5. 我出门了\n6. 睡觉模式但走廊留个小灯\n7. 别开空调，又觉得冷，26 度吧\n8. 玄关灯怎么是开着的？关掉\n9. 打开电视，调到 CCTV6，音量 30\n10. 让扫地机器人去扫地\n\n请直接输出所有解析结果，无需等待确认。"
+    },
+    "41acf47df65c42fd": {
+      "agent_id": "41acf47df65c42fd",
+      "name": "smart_home_context_demo",
+      "role": "smart_home_context_demo",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "",
+      "task": "你是智能家居多轮对话与上下文继承演示器。请模拟一个完整的会话，验证解析器对上下文继承、否定修正、跨设备关联的处理能力。\n\n【会话场景设定】\n模拟用户从\"准备回家 → 调整设备 → 反馈不适 → 修正 → 场景切换\"的完整流程，共 8 轮对话。\n\n【设备-动作映射】\n- light: on/off/brightness(0-100)/color_temp(2700-6500K)/toggle\n- ac: on/off/mode/temperature(16-30)/fan_speed\n- curtain: open/close/position(0-100)\n- tv: on/off/channel/volume(0-100)\n- robot_vacuum: start/pause/stop/return/mode\n- lock: lock/unlock\n- speaker: play/pause/volume\n\n【Location 标准字典】\n客厅→living_room ｜ 主卧→master_bedroom ｜ 次卧→second_bedroom ｜ 厨房→kitchen ｜ 卫生间→bathroom ｜ 书房→study ｜ 阳台→balcony ｜ 玄关→entryway ｜ 餐厅→dining_room ｜ 走廊→corridor\n\n【场景字典】\n- sleep / away / home / movie / dinner / wake-up\n\n【核心解析规则】\n1. 设备识别：名词关键词映射\n2. 位置识别：提取地点，缺省 → living_room\n3. 模糊表达：\n   - \"亮一点/亮一些\" → brightness +20\n   - \"暗一点/暗一些\" → brightness -20\n   - \"太冷了\" → ac heat, 26℃\n   - \"太热了\" → ac cool, 24℃\n   - \"再热一点\" → ac temperature +1\n4. 否定语义（别/不要/不用）：动作取反\n5. 上下文继承（再亮一点/又觉得冷/然后呢）：session 内基于上一次同设备指令增量调整\n6. 跨设备隐含关联（\"我要工作\"→ 书房灯开+电脑通电+静音模式；\"做饭\"→ 厨房灯开+抽油烟机启动）\n7. 疑问句\"怎么X着的\"：提取核心动作\n\n【输出格式】\n对每轮对话输出：\n1. 上一轮 session 状态摘要（若有）\n2. 本轮解析的 JSON 指令\n3. 命中规则与上下文关联说明\n\n【会话剧本】（请按顺序处理以下 8 轮）\n1. 我回家了\n2. 客厅有点暗\n3. 空调开一下，太热了\n4. 再凉一点\n5. 等等，别开空调了\n6. 其实有点冷，25 度吧\n7. 我要工作了\n8. 客厅电视打开，调到体育频道，音量 20\n\n请直接输出完整 8 轮解析结果，每轮独立成段，最后给出 session 上下文继承统计表。"
+    },
+    "bf9cb4f3960d4e21": {
+      "agent_id": "bf9cb4f3960d4e21",
+      "name": "writer",
+      "role": "writer",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "",
+      "task": "你是智能家居 NLU→JSON 转换系统的技术文档撰写专家。基于已完成的规范体系，撰写一份面向工程师的工程交付 README。\n\n【项目背景】\n智能家居项目，需要把用户的自然语言指令（如\"客厅灯太暗了，亮一点\"）转换为标准化 JSON 指令，发送给设备执行层。\n\n【已交付能力】\n1. 主模板：{device, action, parameters, location, scene, idempotent}\n2. 10 类设备动作映射（light/ac/curtain/tv/speaker/fan/robot_vacuum/lock/camera/sensor）\n3. 10 个 Location 标准字典\n4. 6 个场景字典（sleep/away/home/movie/dinner/wake-up）\n5. 5 条校验规则 + 8 条边界策略 + 6 级错误码\n6. 7 条解析规则（含上下文继承、否定取反、跨设备关联）\n7. 3 个子 Agent 已运行验证通过\n\n【输出要求】\n输出一个 Markdown 格式的完整 README.md，包含以下章节：\n\n1. **项目简介**：3-5 行说明产品价值\n2. **核心能力**：列表展示 NL→JSON 的 6 大特性\n3. **快速开始**：含 3 行 Python 代码示例（伪代码）\n4. **输出 JSON 模板**：展示标准结构 + 一个完整例子\n5. **设备动作矩阵表**：用 Markdown 表格列出 10 类设备\n6. **Location 标准字典**：用表格展示中英文映射\n7. **场景字典**：用表格展示 6 个场景及其触发的设备组合\n8. **解析规则清单**：列出 7 条核心解析规则\n9. **错误码体系**：用表格展示 6 级错误码\n10. **多轮上下文示意**：用伪代码展示 session 状态管理\n11. **性能指标**：解析准确率、响应时间、并发能力\n12. **Roadmap**：列出未来 3 个迭代方向\n\n要求：专业、简洁、信息密度高，总字数控制在 1500-2000 字。不要重复之前已展示的演示结果。"
+    },
+    "8ab6ef5020a6477b": {
+      "agent_id": "8ab6ef5020a6477b",
+      "name": "researcher",
+      "role": "researcher",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "",
+      "task": "你是智能家居 NLU→JSON 转换系统的性能与质量评测专家。请基于已交付的规范体系（v1.2），输出一份系统化的压测与质量评估报告。\n\n【任务目标】\n生成一份完整的 benchmark_report.md，包含 4 大维度的评测结果：\n\n1. **解析准确率评测**\n   - 设计 5 个测试集（设备控制/场景触发/上下文继承/否定语义/模糊表达），每个测试集 20 条样例\n   - 给出每个测试集的准确率、召回率、F1\n   - 列出容易出错的 5 类 case\n\n2. **性能压测**\n   - 单条延迟分布（P50/P90/P95/P99）\n   - 吞吐量 QPS 测试（100/500/1000 并发）\n   - 内存占用与 CPU 使用率\n   - 冷启动与热启动对比\n\n3. **鲁棒性测试**\n   - 异常输入处理（空串/超长/乱码/纯 emoji）\n   - 边界场景（参数越界/设备不存在/权限不足）\n   - 多轮上下文边界（session 超时/重启）\n\n4. **对比分析**\n   - 与 3 种基线方案的对比（关键词匹配/规则模板/通用 LLM）\n   - 在准确率、延迟、成本 3 个维度的优劣\n\n【输出要求】\n- Markdown 格式\n- 包含至少 5 个数据表格\n- 字数控制在 2000-2500 字\n- 数字要具体真实，不要出现\"大约\"\"可能\"等模糊词汇\n- 使用 emoji 标记关键结论\n\n【验收标准】\n覆盖准确率、性能、鲁棒性、对比 4 大维度，输出可直接用于技术评审的完整报告。"
+    },
+    "8fb27cf693b948d9": {
+      "agent_id": "8fb27cf693b948d9",
+      "name": "writer",
+      "role": "writer",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "",
+      "task": "你是智能家居 NLU→JSON 转换系统的技术文档工程师。基于已交付的规范体系 v1.2，输出一份生产级 REST API 接口规范文档 api_spec.md。\n\n【任务目标】\n生成一份完整的 API 接口规范文档，供前端、移动端、第三方开发者集成使用。\n\n【必须覆盖的接口模块】\n1. **核心解析接口** POST /v1/nlu/parse\n2. **会话管理接口** POST /v1/session/create / GET /v1/session/{id} / DELETE /v1/session/{id}\n3. **场景管理接口** GET /v1/scenes / POST /v1/scenes/{id}/trigger\n4. **设备字典接口** GET /v1/devices / GET /v1/locations\n5. **健康检查** GET /healthz / GET /readyz\n6. **监控指标** GET /metrics\n\n【每个接口必须包含】\n- 接口路径与方法\n- 请求 Header（鉴权 token、Content-Type、用户角色）\n- 请求体 JSON 示例（完整字段）\n- 响应体 JSON 示例（成功 + 失败两种）\n- 错误码映射（关联错误码体系 E0001-E0006）\n- 限流策略（如 100 次/分钟/用户）\n- 鉴权要求（user_role 等级）\n\n【额外章节】\n1. 接口总览与版本说明\n2. 鉴权与签名机制（Bearer Token + HMAC）\n3. 通用请求/响应规范\n4. 错误码对照表\n5. SDK 调用示例（Python / JavaScript / Java 三语言）\n6. WebSocket 实时通道（多轮对话长连接）\n7. 限流与配额\n8. 变更日志 v1.0 → v1.2\n\n【输出要求】\n- Markdown 格式\n- 字数控制在 2500-3000 字\n- 包含至少 8 个 JSON 示例代码块\n- 包含至少 3 个数据表格\n- 接口路径使用 RESTful 风格\n- 错误码使用 E0001-E0006 体系\n\n【验收标准】\n工程师拿到这份文档能独立完成集成，无需额外沟通。"
+    },
+    "f48aebcf5d104889": {
+      "agent_id": "f48aebcf5d104889",
+      "name": "writer",
+      "role": "writer",
+      "color": "#e8590c",
+      "status": "idle",
+      "bio": "",
+      "task": "你是 API 资产工程师。基于已交付的 API 接口规范 v1.2，生成两份工程化资产：\n\n【资产 1】openapi.yaml\n- OpenAPI 3.0.3 规范\n- 覆盖全部 v1 接口：/v1/nlu/parse、/v1/session/*、/v1/scenes/*、/v1/devices/*、/v1/locations、/healthz、/readyz、/metrics、/v1/realtime\n- 每个接口必须包含：summary、tags、parameters（path/query/header）、requestBody（JSON Schema）、responses（200/4xx/5xx）\n- 顶层定义 securitySchemes（Bearer + HMAC ApiKey）\n- 定义 schemas：NluRequest、NluResponse、Session、Scene、Device、Location、ErrorResponse、RateLimitError\n- components.errorCodes 列出 E0001-E0006\n- 完整的 info：title、version、description、contact、license\n- servers 至少两个：生产 https://api.smarthome-nlu.example.com、沙箱 https://sandbox-api.smarthome-nlu.example.com\n- 文件输出约 600-800 行\n\n【资产 2】postman_collection.json\n- Postman Collection v2.1 格式\n- 文件输出约 400-600 行\n- 顶层字段：info、variable（base_url、token、app_key、app_secret、user_id）、auth（Bearer）、event、item\n- item 分组（用 folders 或 item 一级分组）：\n  1. 健康检查：GET /healthz、GET /readyz\n  2. 核心解析：POST /v1/nlu/parse（5 个用例：基础单设备、上下文继承、否定取反、场景触发、模糊量词）\n  3. 会话管理：3 个用例（create / get / delete）\n  4. 场景管理：2 个用例（list / trigger）\n  5. 设备字典：2 个用例（devices / locations）\n  6. 错误用例：401/422/429 各 1 个\n- 每个 item 包含：name、request（method、header、url、body）、response 示例（status、body json）\n- 预请求脚本（Pre-request Script）：自动生成 timestamp、uuid、HMAC 签名\n\n【两份资产的具体要求】\n1. YAML 与 JSON 必须语法正确，可被 Postman/ Swagger 解析\n2. HMAC 签名逻辑写在 Postman 预请求脚本中（用 pm.environment + pm.sendRequest 模拟）\n3. 响应示例包含至少 1 个成功 + 1 个错误样本\n4. 包含必要的 x-example 与 example 字段\n\n【验收】\n输出一份【资产清单】，列出两份文件的行数、接口数、字段数，验证可被 Postman 与 Swagger 解析。"
+    },
+    "30c995ed16d34f85": {
+      "agent_id": "30c995ed16d34f85",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "0cabfb05c42e485f": {
+      "agent_id": "0cabfb05c42e485f",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "953fd495ae21452e": {
+      "agent_id": "953fd495ae21452e",
+      "name": "general",
+      "role": "general",
+      "color": "#0b7285",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "146e591b29e54c9f": {
+      "agent_id": "146e591b29e54c9f",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "2f8649747ed045b4": {
+      "agent_id": "2f8649747ed045b4",
+      "name": "master",
+      "role": "master",
+      "color": "#c2255c",
+      "status": "idle",
+      "bio": "主协调 Agent，负责任务分析、子 Agent 实例化与工作流编排",
+      "task": "构建一个智能家居自然语言指令转换系统，将用户的自然语言需求（如\"我回家了，把灯打开\"、\"太冷了\"、\"我要睡觉了\"）转换为标准化的设备指令格式。系统需要支持以下能力：\n\n1. 意图识别：识别用户自然语言中的核心意图（灯光控制、温度调节、安防控制、场景切换、窗帘控制、设备查询等）\n2. 实体提取：提取房间、设备名称、参数（亮度、温度、颜色）、时间等关键信息\n3. 场景理解：处理模糊表达（如\"太冷了\"→ 温度调高、\"我要睡觉了\"→ 睡眠场景）\n4. 上下文记忆：记住之前的对话内容，支持多轮对话中的代词指代和省略\n5. 标准化输出：输出统一的 JSON 格式指令，包含 device、room、action、params、timestamp 等字段\n\n技术栈建议：使用 Python 实现，集成 NLP 处理（可用 jieba 分词 + 规则匹配，或接入 LLM API），提供 CLI 和 HTTP API 两种调用方式，包含完整的意图库、设备库、场景库配置。\n\n输出要求：\n- 提供完整可运行的代码（main.py、nlp_processor.py、intent_mapper.py、device_controller.py、scene_manager.py 等模块）\n- 包含详细的配置文件（intents.yaml、devices.yaml、scenes.yaml）\n- 提供使用文档和示例对话\n- 包含单元测试\n- 项目结构清晰，代码规范有注释\n\n将整个项目放在 ./smart_home_nlp/ 目录下。"
+    },
+    "4a54ae14a16f42af": {
+      "agent_id": "4a54ae14a16f42af",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    }
+  }
+}

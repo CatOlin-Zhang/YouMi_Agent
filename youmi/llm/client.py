@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 import httpx
@@ -90,7 +91,9 @@ class LLMResponse:
     @property
     def raw_message(self) -> dict[str, Any]:
         """原始 message 字典 (可直接追加到 messages 列表)"""
-        msg: dict[str, Any] = {"role": "assistant", "content": self.content}
+        # 某些 API (Ollama/MiniMax) 要求 tool_calls 时 content 为 null 而非空字符串
+        content = self.content
+        msg: dict[str, Any] = {"role": "assistant", "content": content if content else None}
         if self.has_tool_calls:
             msg["tool_calls"] = self.tool_calls
         return msg
@@ -245,7 +248,13 @@ class LLMClient:
         finish_reason = ""
 
         async with self._client.stream("POST", "/chat/completions", json=payload) as response:
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # 读取错误详情
+                error_body = await response.aread()
+                logger.error("LLM API error %d: %s | messages_count=%d tools_count=%d",
+                             response.status_code, error_body.decode("utf-8", errors="replace")[:2000],
+                             len(messages), len(tools or []))
+                response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -292,8 +301,17 @@ class LLMClient:
             collected_tool_calls[k] for k in sorted(collected_tool_calls)
         ] if collected_tool_calls else []
 
+        # 修补流式传输中可能缺失的 tool_call_id
+        for i, tc in enumerate(tool_calls_list):
+            if not tc.get("id"):
+                tc["id"] = f"call_{uuid.uuid4().hex[:12]}"
+                logger.warning("Stream: tool_call[%d] missing id, generated: %s", i, tc["id"])
+            if not tc.get("type"):
+                tc["type"] = "function"
+
         raw = {
-            "choices": [{"message": {"role": "assistant", "content": full_content},
+            "choices": [{"message": {"role": "assistant",
+                                     "content": full_content or None},
                          "finish_reason": finish_reason}],
             "usage": {},
         }

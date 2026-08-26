@@ -24,6 +24,9 @@ dev = [
 gui = [
     "streamlit>=1.30",
 ]
+web = [
+    "aiohttp>=3.9",
+]
 vec = [
     "sqlite-vec>=0.1",
 ]

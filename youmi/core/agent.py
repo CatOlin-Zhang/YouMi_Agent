@@ -18,6 +18,7 @@ Agent 基类
 from __future__ import annotations
 
 import asyncio
+import httpx
 import json
 import logging
 import os
@@ -221,6 +222,30 @@ class _ToolRequest(BaseModel):
     tool_description: str = ""
     reason: str = ""
     approved: bool = False
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """简单的文本相似度检测（基于字符集合 Jaccard 相似度）。
+
+    将两段文本各自拆成字符 3-gram 集合，计算 Jaccard 系数。
+    返回值在 [0, 1] 之间，越高表示越相似。
+    """
+    if not a or not b:
+        return 0.0
+
+    def _ngrams(text: str, n: int = 3) -> set[str]:
+        text = text.strip()
+        if len(text) < n:
+            return {text}
+        return {text[i:i + n] for i in range(len(text) - n + 1)}
+
+    set_a = _ngrams(a)
+    set_b = _ngrams(b)
+    if not set_a or not set_b:
+        return 0.0
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return intersection / union if union > 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1204,7 +1229,8 @@ class Agent:
         tool_calls_made: list[str] = []
         iterations = 0
         error_msg: str | None = None
-        _delegation_reminded = False  # 委派提醒标记（每轮仅一次）
+        _consecutive_no_tool = 0  # 连续未调用工具的迭代计数
+        _last_text_no_tool = ""  # 上一次纯文本输出（用于检测重复）
 
         try:
             for i in range(self._config.max_iterations):
@@ -1230,12 +1256,38 @@ class Agent:
 
                 # 流式调用 LLM
                 chunk_text = ""
-                async for chunk in self._llm_client.chat_stream(
-                    messages=observation.messages,
-                    tools=tools_schema or None,
-                ):
-                    chunk_text += chunk
-                    yield chunk  # 逐块产出文本
+                try:
+                    async for chunk in self._llm_client.chat_stream(
+                        messages=observation.messages,
+                        tools=tools_schema or None,
+                    ):
+                        chunk_text += chunk
+                        yield chunk  # 逐块产出文本
+                except httpx.HTTPStatusError as _http_err:
+                    # 400 错误恢复：清理对话中的 tool/assistant+tool_calls 消息，
+                    # 回退到纯文本模式继续对话
+                    if _http_err.response.status_code == 400:
+                        logger.warning(
+                            "LLM 400 Bad Request, 尝试清理 tool 消息后重试"
+                        )
+                        self._conversation = [
+                            m for m in self._conversation
+                            if m.get("role") != "tool"
+                            and not (
+                                m.get("role") == "assistant"
+                                and m.get("tool_calls")
+                            )
+                        ]
+                        # 回退为非工具调用模式：不带 tools schema 重试
+                        observation_clean = await self._observe()
+                        async for chunk in self._llm_client.chat_stream(
+                            messages=observation_clean.messages,
+                            tools=None,
+                        ):
+                            chunk_text += chunk
+                            yield chunk
+                    else:
+                        raise
 
                 # 获取完整响应
                 llm_response: LLMResponse = self._llm_client._last_stream_response
@@ -1268,6 +1320,7 @@ class Agent:
                         should_continue=True,
                     )
                     await self._act(thought)
+                    _consecutive_no_tool = 0  # 重置连续无工具计数
 
                     # yield 工具调用提示
                     yield f"\n*[🔧 调用工具: {fn_name}]*\n"
@@ -1308,30 +1361,89 @@ class Agent:
                                 should_continue=True,
                             )
                             await self._act(thought)
+                            _consecutive_no_tool = 0  # 重置连续无工具计数
                             yield f"\n*[🔧 文本回退调用工具: {fn_name}]*\n"
                             continue
 
-                    # --- 委派强制: 有工具却未调用 → 注入提醒并重试一次 ---
-                    if (
-                        available_tool_names
-                        and not tool_calls_made
-                        and not _delegation_reminded
-                        and len(response_text) > 30
-                    ):
-                        _delegation_reminded = True
-                        reminder = (
-                            "【系统提醒】你有可用的工具（"
-                            + "、".join(available_tool_names)
-                            + "）。你应该使用工具来完成任务，而不是直接回答。"
-                            "请先分析任务，再调用工具创建子Agent来执行。"
-                            "现在请使用工具。"
-                        )
-                        self._conversation.append({"role": "user", "content": reminder})
-                        logger.info("Delegation enforcement: injected reminder")
-                        yield "\n*[⚠️ 系统提醒：请使用工具委派任务]*\n"
-                        continue
+                    # --- 委派强制: LLM 输出纯文本未调用工具 ---
+                    if available_tool_names and len(response_text) > 30:
+                        _consecutive_no_tool += 1
 
-                    # 纯文本回复 → 完成
+                        # 检测重复输出：如果与上一次输出相似度高，提前终止
+                        if _last_text_no_tool and _text_similarity(
+                            response_text, _last_text_no_tool
+                        ) > 0.6:
+                            logger.info(
+                                "Delegation enforcement: repeated output detected, "
+                                "breaking (consecutive_no_tool=%d)",
+                                _consecutive_no_tool,
+                            )
+                            break
+                        _last_text_no_tool = response_text
+
+                        if _consecutive_no_tool <= 3:
+                            # 检查是否有已创建但未运行的子 Agent
+                            _unrun = []
+                            _sub_agents = getattr(self, '_sub_agents', None)
+                            if _sub_agents:
+                                for _aid, _rec in _sub_agents.items():
+                                    if _rec.result is None:
+                                        _st = getattr(_rec.agent, 'status', None)
+                                        _st_val = _st.value if _st else 'created'
+                                        if _st_val in ('created', 'idle'):
+                                            _unrun.append((_aid, _rec.role, _rec.task))
+
+                            # 检查工作流追踪器是否已全部完成
+                            _tracker = getattr(
+                                getattr(self, '_gui_bridge', None), 'tracker', None
+                            )
+                            _wf_done = _tracker.all_done if _tracker else False
+
+                            if _wf_done:
+                                # 工作流已全部完成，提醒汇总结果
+                                reminder = (
+                                    "【系统提示】所有工作流步骤已全部完成。"
+                                    "请立即汇总已有结果并回复用户，不要再调用任何工具。"
+                                )
+                            elif _unrun:
+                                # 有未运行的子 Agent，提醒运行而非创建
+                                _unrun_desc = ", ".join(
+                                    f"{aid[:8]}({role})" for aid, role, _ in _unrun
+                                )
+                                _n = len(_unrun)
+                                reminder = (
+                                    f"【系统提醒】你有 {_n} 个已创建但未运行的子Agent：{_unrun_desc}。"
+                                    f"请使用 run_sub_agent 运行它们，不要创建新的子Agent。"
+                                    f"全部运行完后，汇总结果回复用户。"
+                                )
+                            elif tool_calls_made:
+                                # 工作流中途停下：提醒继续执行
+                                reminder = (
+                                    "【系统提醒】你已经在执行工作流，但当前迭代未调用任何工具。"
+                                    "请继续执行下一步：创建下一个子Agent，或运行已创建的子Agent"
+                                    "（使用 run_sub_agent），或汇总结果回复用户。"
+                                    "不要停下来等待用户输入。"
+                                    "不要重复之前的文字。"
+                                )
+                            else:
+                                # 从未调用工具：提醒开始行动
+                                reminder = (
+                                    "【系统提醒】你有可用的工具（"
+                                    + "、".join(available_tool_names)
+                                    + "）。你应该使用工具来完成任务，而不是直接回答。"
+                                    "请立即调用 create_sub_agent 创建子Agent。"
+                                    "不要输出计划性文字，直接行动。"
+                                )
+                            self._conversation.append({"role": "user", "content": reminder})
+                            logger.info(
+                                "Delegation enforcement: injected reminder "
+                                "(consecutive_no_tool=%d, tool_calls_so_far=%d)",
+                                _consecutive_no_tool, len(tool_calls_made),
+                            )
+                            yield "\n*[⚠️ 系统提醒：请继续使用工具推进工作流]*\n"
+                            continue
+
+                    # 连续无工具调用超限或无工具可用 → 纯文本回复完成
                     break
 
         except Exception as exc:
@@ -1376,6 +1488,17 @@ class Agent:
             from_agent=message.from_agent_id,
             message_id=message.message_id,
         )
+
+        # Hook: message_received — 通知已收到消息
+        if self._hook_registry.has_hooks(HookType.MESSAGE_RECEIVED):
+            ctx = HookContext(
+                hook_type=HookType.MESSAGE_RECEIVED,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                message=message,
+            )
+            await self._hook_registry.invoke(HookType.MESSAGE_RECEIVED, ctx)
+
         await self.on_message_received(message)
 
     async def send_message(
@@ -1397,6 +1520,30 @@ class Agent:
             metadata=metadata or {},
         )
 
+        # Hook: message_sending — 发送前拦截/修改
+        if self._hook_registry.has_hooks(HookType.MESSAGE_SENDING):
+            ctx = HookContext(
+                hook_type=HookType.MESSAGE_SENDING,
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                message=msg,
+            )
+            decision = await self._hook_registry.invoke(HookType.MESSAGE_SENDING, ctx)
+            if decision.decision == HookDecisionType.BLOCK:
+                logger.info(
+                    "message_sending hook blocked message to '%s': %s",
+                    to_agent_id, decision.reason,
+                )
+                return msg
+            if decision.decision == HookDecisionType.MODIFY and "content" in decision.modified_data:
+                msg = AgentMessage(
+                    from_agent_id=self.agent_id,
+                    to_agent_id=to_agent_id,
+                    role=MessageRole.AGENT,
+                    content=decision.modified_data["content"],
+                    metadata=metadata or {},
+                )
+
         if self._bus is not None:
             # 通过 Broker 投递
             from youmi.bus.message import WorkflowMessage, WorkflowMessageType
@@ -1407,15 +1554,15 @@ class Agent:
                 to_agent_id=to_agent_id,
                 msg_type=WorkflowMessageType.STATUS,
                 role=MessageRole.AGENT,
-                content=content,
-                metadata=metadata or {},
+                content=msg.content,
+                metadata=msg.metadata,
             )
             await self._bus.publish(wf_msg)
         else:
             # 仅写入记忆（无 Broker 时退化为原行为）
             await self._memory.on_message(
                 role="agent",
-                content=content,
+                content=msg.content,
                 to_agent=to_agent_id,
                 direction="outbound",
             )

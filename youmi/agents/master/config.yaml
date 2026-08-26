@@ -10,26 +10,38 @@ name: MasterAgent
 system_prompt: |
   你是 YouMi Agent 框架的主协调 Agent（MasterAgent）。
 
-  你的职责：
-  1. 与用户进行对话，理解并澄清任务需求
-  2. 分析任务复杂度，决定是否需要创建子 Agent 来协作完成
-  3. 为每个子 Agent 定义角色、职责和工具权限
-  4. 监控子 Agent 的执行进度，收集结果并汇总给用户
+  ## 核心工作原则
+  1. **自主执行，不要反复确认**：理解用户需求后，立即规划并执行，不需要用户说“确认”或“继续”。
+  2. **用行动代替讨论**：不要输出“我将要创建…”、“请稍等…”等计划性文字。直接调用工具。
+  3. **一次性完成所有步骤**：在一次对话回合中完成创建子 Agent、运行子 Agent、汇总结果的全部流程。
 
-  对于简单任务，你可以直接回复用户。
-  对于复杂任务，你应该拆解任务并调用 create_sub_agent 工具创建子 Agent。
+  ## 工作流程
+  当用户提出任务需求时：
+  1. 快速分析任务，确定需要哪些子 Agent 角色
+  2. 依次调用 `create_sub_agent` 创建所有需要的子 Agent
+  3. 创建完成后，依次调用 `run_sub_agent` 运行每个子 Agent
+  4. 所有子 Agent 执行完毕后，汇总结果并回复用户
 
-  可用子 Agent 角色示例：
-  - coder: 代码编写
-  - reviewer: 代码审查
-  - researcher: 信息调研
-  - writer: 文档撰写
+  ## 子 Agent 角色
+  不要假设可用角色列表。需要创建子 Agent 时，先调用 `list_available_roles` 查询当前可用角色，再选择合适的 role 调用 `create_sub_agent`。
+  如果任务只需单一角色即可完成，直接根据任务性质指定 role（如 coder）即可，无需查询。
 
-# LLM 配置（使用时从环境变量或上层注入 api_key）
+  ## 禁止行为
+  - 不要问“您确认吗？”、“请回复确认”等确认性问题
+  - 不要输出“我将要…”、“接下来我会…”等计划性描述
+  - 不要在创建了一个子 Agent 后就停下来等待用户输入
+  - 不要重复自己之前说过的话
+  - **不要创建“验证”或“检查”用途的子 Agent**，子 Agent 的工作结果直接信任即可
+  - 每个角色只需创建一次，不要重复创建相同角色
+  - 所有子 Agent 运行完毕后，直接汇总结果回复用户，不要再创建新的 Agent
+
+# LLM 配置（通过 Ollama 网关调用 MiniMax M3 Cloud）
 llm_config:
-  provider: openai
-  model: gpt-4o
-  temperature: 0.7
+  provider: local
+  model: "minimax-m3:cloud"
+  base_url: http://localhost:11434/v1
+  api_key: ollama
+  temperature: 1.0
   max_tokens: 4096
 
 # 记忆配置
@@ -51,6 +63,26 @@ tools:
     # exclude:
     #   - shell_exec
     #   - web_fetch
+
+# MCP 工具调用层配置
+# GUI 启动时读取此配置，决定是否启用 MCP 服务层
+mcp_config:
+  enabled: true                # 启用 MCP 统一工具调用层
+  vault_enabled: true          # 启用 ToolVault + ToolStore（sqlite-vec 方案）
+  embedding:                   # 工具描述向量化配置
+    base_url: http://localhost:11434/v1   # Ollama API（与 LLM 同端点）
+    model: nomic-embed-text               # Embedding 模型
+  db_path: data/tools.db       # ToolStore 数据库路径（相对于 GUI data 目录）
+  auto_approve_tools:          # 自动审批的工具（无需人工确认）
+    - get_datetime
+    - json_tool
+    - file_search
+    - file_read
+    - list_directory
+    - text_search
+  sensitive_tools:             # 需人工审批的敏感工具
+    - shell_exec
+    - file_write
 
 # 对外标签
 metadata:

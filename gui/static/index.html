@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouMi Agent · 群聊</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- 左侧：会话 / 通讯录 -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="me">YouMi</div>
+        <div class="header-actions">
+          <button id="btn-new-chat" title="新建单聊">＋</button>
+          <button id="btn-new-group" title="新建群聊">⊕</button>
+        </div>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-tab="chats">会话</div>
+        <div class="tab" data-tab="contacts">通讯录</div>
+      </div>
+      <div class="tab-body" id="tab-chats">
+        <ul id="session-list" class="list"></ul>
+      </div>
+      <div class="tab-body hidden" id="tab-contacts">
+        <ul id="contact-list" class="list"></ul>
+      </div>
+    </aside>
+
+    <!-- 中间：聊天窗口 -->
+    <main class="chat">
+      <div class="chat-header" id="chat-header">
+        <div class="title">选择一个会话开始</div>
+        <div class="subtitle"></div>
+      </div>
+      <div class="messages" id="messages">
+        <div class="empty-hint">左侧选择或新建一个会话，开始与 Agent 群聊</div>
+      </div>
+      <div class="composer">
+        <textarea id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行" rows="2"></textarea>
+        <button id="send">发送</button>
+      </div>
+    </main>
+
+    <!-- 右侧：成员面板 + 工作流追踪 -->
+    <aside class="members" id="members-panel">
+      <div class="members-header">成员</div>
+      <ul id="member-list" class="list"></ul>
+      <button id="btn-add-member" class="hidden">＋ 添加成员</button>
+
+      <!-- 工作流 TODO 面板 -->
+      <div id="workflow-panel" class="workflow-panel hidden">
+        <div class="workflow-header">
+          <span class="workflow-title">📋 工作流</span>
+          <span class="workflow-progress" id="workflow-progress"></span>
+        </div>
+        <ul id="workflow-steps" class="workflow-steps"></ul>
+      </div>
+
+      <!-- MCP 工具面板 -->
+      <div id="tools-panel" class="tools-panel hidden">
+        <div class="tools-header">
+          <span class="tools-title">🛠️ 工具</span>
+          <span class="tools-stats" id="tools-stats"></span>
+        </div>
+        <ul id="tools-list" class="tools-list"></ul>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 通用弹窗 -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel">取消</button>
+        <button id="modal-ok" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

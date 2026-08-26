@@ -1,0 +1,46 @@
+[
+  {
+    "msg_id": "u_401afde37dab",
+    "session_id": "sess_eaebb6da3e28",
+    "agent_id": "__user__",
+    "agent_name": "我",
+    "role": "user",
+    "kind": "text",
+    "text": "帮我查一下最近的 AI Agent 框架动态",
+    "ts": 1787709766.2774549,
+    "meta": {}
+  },
+  {
+    "msg_id": "m_d625577d55e3",
+    "session_id": "sess_eaebb6da3e28",
+    "agent_id": "master",
+    "agent_name": "master",
+    "role": "assistant",
+    "kind": "text",
+    "text": "用户在问「帮我查一下最近的 AI Agent 框架动态」。\n这需要最新的外部信息，仅凭已有知识可能不够准确，\n先调用搜索工具收集资料，再基于结果整理回答。",
+    "ts": 1787709766.2784548,
+    "meta": {}
+  },
+  {
+    "msg_id": "tool_cd3303561970",
+    "session_id": "sess_eaebb6da3e28",
+    "agent_id": "master",
+    "agent_name": "master",
+    "role": "tool",
+    "kind": "tool",
+    "text": "**🔧 web_search**\n\n参数：`{\"query\": \"帮我查一下最近的 AI Agent 框架动态\"}`\n\n结果：\n共找到 8 条相关结果，已按相关度排序并摘取摘要。",
+    "ts": 1787709766.6973836,
+    "meta": {}
+  },
+  {
+    "msg_id": "m_57fa1e42e6c5",
+    "session_id": "sess_eaebb6da3e28",
+    "agent_id": "master",
+    "agent_name": "master",
+    "role": "assistant",
+    "kind": "text",
+    "text": "收到你的问题：「帮我查一下最近的 AI Agent 框架动态」。\n\n我来拆解一下：\n1. 先明确目标与约束；\n2. 调用相关工具收集信息；\n3. 给出可执行的方案。\n\n如果是群聊，我会让小组成员分别跟进。",
+    "ts": 1787709767.3076868,
+    "meta": {}
+  }
+]
