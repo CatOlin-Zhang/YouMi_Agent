@@ -111,6 +111,7 @@ class EngineBridge:
         self.hook_bridge = GUIHookBridge(self)
         self.hook_bridge.inject(self.master)
         self._patch_create_sub_agent()
+        self._patch_run_sub_agent()
         self._card_for_agent(self.master.agent_id, self.master.name, "master")
         logger.info(
             "EngineBridge 初始化完成: master=%s, 会话数=%d, mcp=%s, bus=%s",
@@ -182,6 +183,20 @@ class EngineBridge:
 
         self.master.create_sub_agent = patched
 
+    def _patch_run_sub_agent(self) -> None:
+        """包装 MasterAgent.run_sub_agent，在子 Agent 实际运行时广播 running/idle 状态。"""
+        original = self.master.run_sub_agent
+        bridge = self
+
+        async def patched(agent_id: str):
+            bridge.update_agent_status(agent_id, "running")
+            try:
+                return await original(agent_id)
+            finally:
+                bridge.update_agent_status(agent_id, "idle")
+
+        self.master.run_sub_agent = patched
+
     def on_sub_agent_created(self, agent: Any, role: str, task: str) -> None:
         """子 Agent 被创建后：登记卡片并（若正处于某群聊中）加入该群。
 
@@ -208,6 +223,22 @@ class EngineBridge:
                 sess.updated_at = time.time()
                 self.store.save_state(self.sessions, self.cards)
             self._emit(agent_join(session_id, card.to_dict()))
+            self._emit(agent_update(session_id, agent.agent_id, card.status))
+
+    def update_agent_status(self, agent_id: str, status: str) -> None:
+        """更新某 Agent 的运行状态并广播到前端。
+
+        状态约定：
+        - idle: 空闲/已完成
+        - running: 正在执行任务（前端会闪烁提示）
+        """
+        card = self.cards.get(agent_id)
+        if card:
+            card.status = status
+            self.store.save_state(self.sessions, self.cards)
+        session_id = self.active_session_id
+        if session_id:
+            self._emit(agent_update(session_id, agent_id, status))
 
     # ------------------------------------------------------------------
     # 事件广播

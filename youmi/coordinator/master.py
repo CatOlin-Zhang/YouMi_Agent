@@ -33,7 +33,9 @@ from youmi.core.types import (
     MessageRole,
 )
 from youmi.agents import load_agent_config
+from youmi.coordinator.tool_approval import ToolApprovalMixin
 from youmi.llm.client import LLMClient
+from youmi.mcp.approval import ApprovalManager
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,7 @@ class SubAgentRecord:
 # MasterAgent
 # ---------------------------------------------------------------------------
 
-class MasterAgent(Agent):
+class MasterAgent(ToolApprovalMixin, Agent):
     """主协调 Agent
 
     MasterAgent 是框架的入口 Agent，负责：
@@ -127,11 +129,22 @@ class MasterAgent(Agent):
         config: AgentConfig,
         memory_strategy: str | None = None,
         llm_call: Any | None = None,
+        global_memory: Any | None = None,
+        plan_memory: Any | None = None,
     ) -> None:
         super().__init__(config, memory_strategy=memory_strategy, llm_call=llm_call)
 
         # 子 Agent 注册表
         self._sub_agents: dict[str, SubAgentRecord] = {}
+
+        # P6: 全局记忆 (工具经验知识库，专供工具管理 Agent 使用)
+        self._global_memory = global_memory
+
+        # Plan-then-Execute: Plan 记忆复用层（可选）
+        self._plan_memory = plan_memory
+
+        # WorkflowPlanner 实例（懒创建，在 on_initialize 中初始化）
+        self._planner: Any | None = None
 
         # P1: 工具申请待处理队列 {requester_agent_id: (tool_description, reason)}
         self._pending_tool_requests: dict[str, tuple[str, str]] = {}
@@ -142,13 +155,24 @@ class MasterAgent(Agent):
         # P1: 后台流水线
         self._post_task_pipeline: Any = None  # PostTaskPipeline | None
 
-        # structure.md §2: 三级审批模型
-        self._auto_approve_list: set[str] = set()      # 自动审批工具清单
-        self._sensitive_tools: set[str] = set()          # 需人工审批的敏感工具
+        # structure.md §2: 三级审批模型（委托 ApprovalManager 统一管理 + 审计）
+        self._approval_manager = ApprovalManager()
+        self._auto_approve_list: set[str] = set()      # 自动审批工具清单（镜像，与 manager 同步）
+        self._sensitive_tools: set[str] = set()          # 需人工审批的敏感工具（镜像，与 manager 同步）
         self._manual_review_queue: dict[str, dict[str, Any]] = {}  # 待人工审批队列
 
         # 注册 MasterAgent 内置工具
         self._register_master_tools()
+
+    @property
+    def global_memory(self) -> Any | None:
+        """全局记忆实例 (P6, 可选) — 工具经验知识库"""
+        return self._global_memory
+
+    @property
+    def plan_memory(self) -> Any | None:
+        """Plan 记忆复用层（可选） — 相似任务 WorkflowPlan 复用"""
+        return self._plan_memory
 
     # -----------------------------------------------------------------------
     # 工厂方法
@@ -324,7 +348,14 @@ class MasterAgent(Agent):
         """
         record = self._sub_agents.get(agent_id)
         if record is None:
-            raise KeyError(f"子 Agent '{agent_id}' 未注册，请先调用 create_sub_agent()")
+            available = ", ".join(
+                f"{aid[:8]}({rec.role})" for aid, rec in self._sub_agents.items()
+            ) or "无"
+            raise KeyError(
+                f"子 Agent '{agent_id}' 未注册。"
+                f"当前已创建的子 Agent：{available}。"
+                f"请先用 create_sub_agent 创建子 Agent，再用返回的 agent_id 调用 run_sub_agent。"
+            )
 
         # P1: 进程隔离模式
         if record.isolated:
@@ -361,17 +392,21 @@ class MasterAgent(Agent):
         return result
 
     def _broadcast_sub_result(self, bridge: Any, agent: Any, result: TaskResult) -> None:
-        """将子 Agent 的执行结果作为独立气泡广播到群聊。"""
+        """将子 Agent 的执行结果作为该 Agent 的直接发言广播到群聊。"""
         from gui.engine.models import MessageRecord, new_id
 
         session_id = bridge.active_session_id
         if not session_id:
             return
         output = str(result.output or "")
-        if len(output) > 3000:
-            output = output[:3000] + "\n...(内容过长已截断)"
+        if not output.strip():
+            return
+        if len(output) > 4000:
+            output = output[:4000] + "\n\n...(内容过长已截断)"
         card = bridge.card_for(agent.agent_id, agent.name)
-        text = f"#### ✅ {card.name} 完成任务\n\n{output}"
+        # 不再使用 #### ✅ 前缀，避免前端折叠成结果卡片；
+        # agent 名称由前端 seg-agent-badge 展示，实现群聊中“谁发言谁显示”的效果。
+        text = output
         msg_id = new_id("sub")
         rec = MessageRecord(
             msg_id=msg_id,
@@ -506,297 +541,7 @@ class MasterAgent(Agent):
         from youmi.tools.coordinator_ops import register_coordinator_tools
         register_coordinator_tools(self)
 
-    # -----------------------------------------------------------------------
-    # P1: 工具申请处理
-    # -----------------------------------------------------------------------
 
-    async def _start_tool_request_listener(self) -> None:
-        """启动工具申请监听任务
-
-        在后台持续监听 SubAgent 发送的 TOOL_REQUEST 消息。
-        自动 subscribe 到 broker（如果尚未 subscribe）。
-        """
-        if self._bus is None:
-            return
-
-        # 确保 MasterAgent 已 subscribe 到 broker
-        try:
-            await self._bus.subscribe(self.agent_id, self._workflow_id)
-        except Exception:
-            pass  # 已 subscribe 或不支持 subscribe 时忽略
-
-        async def _listener():
-            from youmi.bus.message import WorkflowMessage, WorkflowMessageType
-            while self._status in (AgentStatus.RUNNING, AgentStatus.IDLE):
-                try:
-                    msg = await self._bus.wait_for_message(
-                        self.agent_id, timeout=2.0,
-                    )
-                    if msg is None:
-                        continue
-                    if msg.msg_type == WorkflowMessageType.TOOL_REQUEST:
-                        await self._handle_tool_request(msg)
-                except asyncio.CancelledError:
-                    break
-                except Exception as exc:
-                    logger.debug("Tool request listener error: %s", exc)
-
-        self._tool_request_listener_task = asyncio.create_task(_listener())
-        logger.info("MasterAgent tool request listener started")
-
-    async def _handle_tool_request(self, message: Any) -> None:
-        """处理子 Agent 的工具申请
-
-        解析申请内容，在已有工具库中搜索匹配，回复批准或拒绝。
-        支持三级审批模型 (structure.md §2):
-        - 自动审批: 工具在 auto_approve_list 中
-        - 人工审批: 工具在 sensitive_tools 中
-        - Master 审批: 其他情况，自动匹配后批准
-
-        Args:
-            message: WorkflowMessage (TOOL_REQUEST)
-        """
-        from youmi.bus.message import WorkflowMessage, WorkflowMessageType
-
-        requester_id = message.from_agent_id
-        try:
-            req_data = json.loads(message.content)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Invalid tool request from '%s'", requester_id)
-            return
-
-        tool_desc = req_data.get("tool_description", "")
-        reason = req_data.get("reason", "")
-
-        logger.info(
-            "Tool request from '%s': %s (reason: %s)",
-            requester_id, tool_desc, reason[:60],
-        )
-
-        # 记录待处理申请
-        self._pending_tool_requests[requester_id] = (tool_desc, reason)
-
-        # ---- 搜索匹配工具 ----
-        available_tools = list(self._tool_registry.tool_names) if self._tool_registry else []
-        matched_tools: list[str] = []
-
-        # 优先: ToolVault 向量搜索 (structure.md §2 自然语言工具发现)
-        vault = getattr(self._tool_bridge, '_vault', None) if self._tool_bridge else None
-        if vault is not None:
-            try:
-                search_results = await vault.search(tool_desc, top_k=5, min_score=0.2)
-                for r in search_results:
-                    if r.tool_name not in matched_tools:
-                        matched_tools.append(r.tool_name)
-            except Exception as exc:
-                logger.debug("ToolVault search in _handle_tool_request failed: %s", exc)
-
-        # 回退: 关键词匹配 + 工具描述搜索
-        if not matched_tools:
-            keywords = [kw for kw in tool_desc.lower().split() if len(kw) > 2]
-            for tool_name in available_tools:
-                name_lower = tool_name.lower()
-                if any(kw in name_lower for kw in keywords):
-                    matched_tools.append(tool_name)
-                    continue
-                # 也搜索工具描述
-                if self._tool_registry:
-                    defn = self._tool_registry._definitions.get(tool_name)
-                    if defn and any(kw in defn.description.lower() for kw in keywords):
-                        matched_tools.append(tool_name)
-
-        # ---- 三级审批决策 (structure.md §2) ----
-        approved = False
-        approval_mode = "master"  # 默认 Master 审批
-
-        if matched_tools:
-            # 检查自动审批清单
-            auto_approved = [t for t in matched_tools if t in self._auto_approve_list]
-            # 检查敏感工具
-            sensitive = [t for t in matched_tools if t in self._sensitive_tools]
-
-            if auto_approved and not sensitive:
-                # 自动审批: 工具在可扩展清单内
-                approved = True
-                approval_mode = "auto"
-                matched_tools = auto_approved
-            elif sensitive:
-                # 人工审批: 涉及敏感工具，加入待审核队列
-                self._manual_review_queue[requester_id] = {
-                    "tool_desc": tool_desc,
-                    "reason": reason,
-                    "matched_tools": sensitive,
-                }
-                response_content = json.dumps({
-                    "approved": False,
-                    "reason": f"工具 {', '.join(sensitive)} 需要人工审批，已加入待审核队列",
-                    "pending_manual_review": True,
-                }, ensure_ascii=False)
-                response_msg = WorkflowMessage(
-                    workflow_id=message.workflow_id,
-                    from_agent_id=self.agent_id,
-                    to_agent_id=requester_id,
-                    msg_type=WorkflowMessageType.TOOL_RESPONSE,
-                    role=MessageRole.AGENT,
-                    content=response_content,
-                    metadata={"approved": False, "pending_manual_review": True},
-                )
-                await self._bus.publish(response_msg)
-                logger.info(
-                    "Tool request from '%s' queued for manual review: %s",
-                    requester_id, sensitive,
-                )
-                return  # 不立即回复，等待人工确认
-            else:
-                # Master 审批: 自动批准匹配到的工具
-                approved = True
-                approval_mode = "master"
-
-        # ---- 将工具添加到 SubAgent 的 ToolBridge (structure.md §2 热更新时序) ----
-        if approved and matched_tools:
-            record = self._sub_agents.get(requester_id)
-            if record is not None:
-                bridge = record.agent._tool_bridge
-                for tn in matched_tools:
-                    if bridge is not None:
-                        bridge.add_allowed_tool(tn)
-                    # 同步更新 config.allowed_tools
-                    current = list(record.agent.config.allowed_tools)
-                    if tn not in current:
-                        current.append(tn)
-                    record.agent._config = record.agent.config.model_copy(
-                        update={"allowed_tools": current}
-                    )
-                logger.info(
-                    "ToolBridge updated for '%s': +%s (approval=%s)",
-                    requester_id, matched_tools, approval_mode,
-                )
-
-        if approved:
-            response_content = json.dumps({
-                "approved": True,
-                "matched_tools": matched_tools,
-                "approval_mode": approval_mode,
-                "reason": f"找到匹配工具 ({approval_mode}): {', '.join(matched_tools)}",
-            }, ensure_ascii=False)
-            logger.info(
-                "Tool request approved for '%s': %s (mode=%s)",
-                requester_id, matched_tools, approval_mode,
-            )
-        else:
-            response_content = json.dumps({
-                "approved": False,
-                "reason": f"未找到匹配的工具，当前可用: {', '.join(available_tools[:10])}",
-            }, ensure_ascii=False)
-            logger.info(
-                "Tool request denied for '%s': no matching tools",
-                requester_id,
-            )
-
-        # 发送回复
-        response_msg = WorkflowMessage(
-            workflow_id=message.workflow_id,
-            from_agent_id=self.agent_id,
-            to_agent_id=requester_id,
-            msg_type=WorkflowMessageType.TOOL_RESPONSE,
-            role=MessageRole.AGENT,
-            content=response_content,
-            metadata={"approved": approved},
-        )
-        await self._bus.publish(response_msg)
-
-        # 清理待处理队列
-        self._pending_tool_requests.pop(requester_id, None)
-
-    def approve_tool_request(self, agent_id: str, tool_names: list[str]) -> bool:
-        """手动批准子 Agent 的工具申请
-
-        将工具添加到 SubAgent 的 ToolBridge 和 config.allowed_tools，
-        使下一轮 _think() 自动包含新工具 (structure.md §2 热更新时序)。
-
-        Args:
-            agent_id: 子 Agent ID
-            tool_names: 批准的工具名列表
-
-        Returns:
-            True 如果成功批准
-        """
-        record = self._sub_agents.get(agent_id)
-        if record is None:
-            return False
-
-        # 1. 更新 ToolBridge (structure.md §2: add_allowed_tool 立即生效)
-        bridge = record.agent._tool_bridge
-        if bridge is not None:
-            for tn in tool_names:
-                bridge.add_allowed_tool(tn)
-
-        # 2. 同步更新 config.allowed_tools
-        current = list(record.agent.config.allowed_tools)
-        changed = False
-        for tn in tool_names:
-            if tn not in current:
-                current.append(tn)
-                changed = True
-        if changed:
-            record.agent._config = record.agent.config.model_copy(
-                update={"allowed_tools": current}
-            )
-
-        # 3. 清理待处理队列
-        self._pending_tool_requests.pop(agent_id, None)
-        self._manual_review_queue.pop(agent_id, None)
-
-        logger.info("Approved tools for '%s': %s", agent_id, tool_names)
-        return True
-
-    def deny_tool_request(self, agent_id: str, reason: str = "") -> bool:
-        """拒绝子 Agent 的工具申请
-
-        Args:
-            agent_id: 子 Agent ID
-            reason: 拒绝原因
-
-        Returns:
-            True 如果成功拒绝
-        """
-        if agent_id in self._pending_tool_requests:
-            self._pending_tool_requests.pop(agent_id)
-            logger.info("Denied tool request from '%s': %s", agent_id, reason)
-            return True
-        return False
-
-    def set_auto_approve_list(self, tool_names: list[str]) -> None:
-        """设置自动审批工具清单 (structure.md §2 审批决策模型)
-
-        工具在此清单内时，SubAgent 的工具申请将被自动批准，
-        无需 MasterAgent 干预。
-
-        Args:
-            tool_names: 自动审批的工具名称列表
-        """
-        self._auto_approve_list = set(tool_names)
-        logger.info("Auto-approve list set: %s", tool_names)
-
-    def set_sensitive_tools(self, tool_names: list[str]) -> None:
-        """设置敏感工具清单 (structure.md §2 审批决策模型)
-
-        工具在此清单内时，SubAgent 的申请将进入人工审批队列，
-        暂停 Agent 等待用户确认。
-
-        Args:
-            tool_names: 需人工审批的工具名称列表
-        """
-        self._sensitive_tools = set(tool_names)
-        logger.info("Sensitive tools list set: %s", tool_names)
-
-    def get_manual_review_queue(self) -> dict[str, dict[str, Any]]:
-        """获取待人工审批的工具申请队列
-
-        Returns:
-            {requester_agent_id: {tool_desc, reason, matched_tools}}
-        """
-        return dict(self._manual_review_queue)
 
     # -----------------------------------------------------------------------
     # P1: 新任务循环
@@ -807,10 +552,15 @@ class MasterAgent(Agent):
         max_turns: int = 0,
         exit_keywords: tuple[str, ...] = ("exit", "quit", "退出"),
     ) -> None:
-        """多轮任务循环 — 等待用户新一轮对话
+        """多轮任务循环 — Plan-then-Execute 主流程
 
-        循环调用 chat_turn() 与用户交互。检测到新任务信号时触发完整任务流程，
-        任务完成后输出汇总并等待下一轮用户输入。
+        检测到新任务时走 Plan-then-Execute 两阶段：
+        1. WorkflowPlanner.generate_plan() 生成结构化 WorkflowPlan（LLM 规划阶段）
+        2. WorkflowExecutor.execute() 确定性执行 Plan（引擎执行阶段）
+        3. 执行完成后将 Plan 写入 PlanMemory（下次相似任务复用）
+        4. 降级：若 Planner 不可用或生成失败，回退 chat_turn() 路径
+
+        非新任务信号（闲聊/澄清）继续走 chat_turn() 原有路径。
 
         Args:
             max_turns: 最大轮数，0 表示不限制
@@ -819,7 +569,7 @@ class MasterAgent(Agent):
         turns = 0
         task_count = 0
 
-        logger.info("MasterAgent conversation loop started")
+        logger.info("MasterAgent conversation loop started (Plan-then-Execute mode)")
 
         while True:
             # 检查退出条件
@@ -829,9 +579,6 @@ class MasterAgent(Agent):
 
             turns += 1
 
-            # 通过 chat_turn 获取用户输入和回复
-            # 注意: 实际场景中用户输入由 GUI/CLI 层提供
-            # 这里提供一个接口供上层调用
             user_message = await self._get_user_input()
             if user_message is None:
                 logger.info("No user input, exiting conversation loop")
@@ -854,17 +601,114 @@ class MasterAgent(Agent):
                 if task_count > 1:
                     await self.reset_for_new_task()
 
-            # 执行对话轮次
-            result = await self.chat_turn(user_message)
-
-            logger.debug(
-                "Turn %d result: iterations=%d error=%s",
-                turns, result.get("iterations", 0), result.get("error"),
-            )
+                # Plan-then-Execute：有 Planner 时走双阶段，否则降级
+                if self._planner is not None:
+                    await self._run_plan_then_execute(user_message)
+                else:
+                    # 没有 LLM 客户端，降级为原有 chat_turn 路径
+                    logger.debug("No planner available, falling back to chat_turn")
+                    await self.chat_turn(user_message)
+            else:
+                # 闲聊/澄清 → 原有路径
+                result = await self.chat_turn(user_message)
+                logger.debug(
+                    "Turn %d result: iterations=%d error=%s",
+                    turns, result.get("iterations", 0), result.get("error"),
+                )
 
         logger.info(
             "Conversation loop ended: %d turns, %d tasks",
             turns, task_count,
+        )
+
+    async def _run_plan_then_execute(self, user_task: str) -> None:
+        """Plan-then-Execute 两阶段执行
+
+        1. Planner 生成 WorkflowPlan（失败则降级 chat_turn）
+        2. WorkflowExecutor 按 Plan 确定性执行
+        3. 将执行结果写入 Agent 记忆，供后续对话上下文使用
+        4. 成功 Plan 写入 PlanMemory
+
+        Args:
+            user_task: 用户任务文本
+        """
+        from youmi.coordinator.plan import WorkflowExecutor
+
+        # 阶段1：生成 Plan
+        try:
+            plan = await self._planner.generate_plan(user_task)
+            logger.info(
+                "MasterAgent plan generated: name='%s' steps=%d source=%s",
+                plan.name, len(plan.steps), plan.metadata.get("source", "unknown"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "MasterAgent plan generation failed (%s), falling back to chat_turn",
+                exc,
+            )
+            await self.chat_turn(user_task)
+            return
+
+        # 阶段2：执行 Plan
+        executor = WorkflowExecutor(
+            master_agent=self,
+            plan=plan,
+            parallel=True,
+            fail_fast=True,
+            on_step_start=self._on_plan_step_start,
+            on_step_complete=self._on_plan_step_complete,
+        )
+
+        try:
+            results = await executor.execute()
+        except Exception as exc:
+            logger.error("MasterAgent plan execution failed: %s", exc)
+            results = executor.results
+
+        summary = executor.get_summary()
+        logger.info("MasterAgent plan execution summary: %s", summary)
+
+        # 将执行摘要写入 Agent 记忆（让后续对话知晓任务结果）
+        completed = summary.get("completed", 0)
+        failed = summary.get("failed", 0)
+        skipped = summary.get("skipped", 0)
+        summary_text = (
+            f"任务执行完成。计划：{plan.name}，"
+            f"步骤共 {len(plan.steps)} 个，"
+            f"完成 {completed}，失败 {failed}，跳过 {skipped}。"
+        )
+        # 收集各步骤输出供汇总
+        step_outputs: list[str] = []
+        for step_id, step_result in results.items():
+            if step_result.task_result and step_result.task_result.output:
+                output_preview = str(step_result.task_result.output)[:300]
+                step_outputs.append(f"[{step_id}] {output_preview}")
+        if step_outputs:
+            summary_text += "\n\n各步骤输出摘要：\n" + "\n".join(step_outputs)
+
+        if self._memory:
+            await self._memory.on_message("assistant", summary_text)
+
+        # 保存 Plan 到 PlanMemory（有至少一个步骤成功时标记 success）
+        any_success = completed > 0
+        if self._plan_memory is not None:
+            try:
+                await self._plan_memory.save_plan(user_task, plan, success=any_success)
+                logger.info(
+                    "MasterAgent: plan saved to PlanMemory (success=%s)", any_success
+                )
+            except Exception as exc:
+                logger.warning("MasterAgent: failed to save plan to PlanMemory: %s", exc)
+
+    async def _on_plan_step_start(self, step: Any, result: Any) -> None:
+        """Plan 步骤开始回调（供 WorkflowExecutor 调用）"""
+        logger.debug("Plan step starting: step_id=%s role=%s", step.step_id, step.role)
+
+    async def _on_plan_step_complete(self, step: Any, result: Any) -> None:
+        """Plan 步骤完成回调（供 WorkflowExecutor 调用）"""
+        logger.debug(
+            "Plan step completed: step_id=%s status=%s",
+            step.step_id, result.status.value,
         )
 
     async def _get_user_input(self) -> str | None:
@@ -932,6 +776,8 @@ class MasterAgent(Agent):
         self._sub_agents.clear()
         self._pending_tool_requests.clear()
         self._manual_review_queue.clear()
+        # 清理已完结的审批记录（保留审计日志）
+        self._approval_manager.clear_resolved()
 
         # 重置状态为 IDLE
         if self._status != AgentStatus.DESTROYED:
@@ -944,12 +790,18 @@ class MasterAgent(Agent):
     # -----------------------------------------------------------------------
 
     async def on_initialize(self) -> None:
-        """初始化钩子：创建 LLM 客户端"""
+        """初始化钩子：创建 LLM 客户端 + 懒创建 WorkflowPlanner"""
         # 创建 LLM 客户端（如果配置了 api_key）
         llm_cfg = self._config.llm_config
         if llm_cfg.api_key or llm_cfg.base_url:
             self._llm_client = LLMClient(llm_cfg)
             logger.info("MasterAgent LLM client created: model=%s", llm_cfg.model)
+
+        # Plan-then-Execute：懒创建 WorkflowPlanner（需要 LLM 客户端）
+        if self._llm_client is not None:
+            from youmi.coordinator.planner import WorkflowPlanner
+            self._planner = WorkflowPlanner(self, plan_memory=self._plan_memory)
+            logger.info("MasterAgent WorkflowPlanner created")
 
     async def on_start(self, task: str) -> None:
         """任务开始钩子：启动工具申请监听"""
@@ -981,7 +833,16 @@ class MasterAgent(Agent):
         if completed_results:
             try:
                 from youmi.coordinator.post_task import PostTaskPipeline
-                pipeline = PostTaskPipeline()
+                # P6: 传递全局记忆和 ToolStore（如可用）
+                tool_store = None
+                bridge = getattr(self, '_tool_bridge', None)
+                vault = bridge.vault if bridge is not None else None
+                if vault is not None:
+                    tool_store = getattr(vault, 'store', None)
+                pipeline = PostTaskPipeline(
+                    tool_store=tool_store,
+                    global_memory=self._global_memory,
+                )
                 self._post_task_pipeline = pipeline
                 # 在后台运行，不阻塞主流程
                 asyncio.create_task(pipeline.run(self, completed_results))

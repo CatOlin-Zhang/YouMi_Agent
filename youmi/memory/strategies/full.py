@@ -42,6 +42,10 @@ class FullMemoryStrategy(MemoryStrategy):
     async def clear(self) -> None:
         self._messages.clear()
 
+    async def search(self, query: str, top_k: int = 5) -> list[dict[str, str]]:
+        """关键词检索全部历史消息 (P6)"""
+        return MemoryStrategy.keyword_search(self._messages, query, top_k)
+
     async def snapshot(self) -> dict[str, Any]:
         base = await super().snapshot()
         user_count = sum(1 for m in self._messages if m["role"] == "user")

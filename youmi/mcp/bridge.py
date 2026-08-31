@@ -8,6 +8,8 @@ ToolBridge — Agent 与 MCP Server 之间的桥梁
 4. 调用追踪 — 记录工具调用日志
 5. 召回确认闭环 — 搜索工具后确认/否决/扩大搜索
 6. 上下文注入 — 为 SubAgent 注入指定工具到 HOT 状态
+7. 工具发现元工具 — search_new_tools（Vault 语义搜索 + 授权加载，
+   Agent 工具不足时向 MCP 提需求，由其执行向量查询等步骤）
 
 Agent 通过 ToolBridge 与 MCP 层交互，
 不再直接持有 ToolRegistry。
@@ -18,9 +20,10 @@ Agent 通过 ToolBridge 与 MCP 层交互，
         agent_id="agent-001",
         mcp_client=mcp_client,
         allowed_tools=["get_weather", "calculate"],
+        search_meta_tool=True,
     )
 
-    # LLM 看到的 tools schema
+    # LLM 看到的 tools schema（含 search_new_tools 元工具）
     schemas = bridge.to_openai_tools()
 
     # 执行工具
@@ -36,6 +39,7 @@ Agent 通过 ToolBridge 与 MCP 层交互，
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -50,6 +54,66 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# search_new_tools 元工具（工具发现入口）
+# ---------------------------------------------------------------------------
+
+SEARCH_NEW_TOOLS_NAME = "search_new_tools"
+"""工具发现元工具名 — 在 ToolBridge 本地拦截执行，不经过 MCPServer 路由。
+
+设计动机（structure.md §2 + §5.2）：任何 Agent 在工具不足时都应能
+向 MCP 提需求，由 Vault 执行向量查询并返回候选；Agent 选定后加载
+（自动授权 + 提升为 HOT）。schema 由 to_openai_tools() 附加，
+执行由 call_tool() 拦截，因此不受 allowed_tools 白名单限制，
+也不会与其他 Agent 的同名工具产生 Server 路由冲突。
+"""
+
+
+def _search_new_tools_schema() -> dict[str, Any]:
+    """构造 search_new_tools 元工具的 OpenAI schema。
+
+    每次调用返回新对象，避免调用方修改共享常量。
+    语义与 youmi/core/agent.py 中 _register_search_new_tools 的
+    ToolRegistry 版本保持一致（MCP 模式下由本 Bridge 接管）。
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": SEARCH_NEW_TOOLS_NAME,
+            "description": (
+                "搜索发现当前尚不可用的工具。"
+                "当现有工具不足以完成任务时，用自然语言描述所需能力，"
+                "本工具会在工具库中执行语义/关键词检索并返回候选列表；"
+                "选定后再次调用本工具并传 load=<工具名> 即可加载该工具"
+                "（自动授权并注入上下文，之后可直接调用）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "自然语言描述你需要的工具功能"
+                            "（load 模式下可省略）"
+                        ),
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "返回候选工具数量，默认 5",
+                    },
+                    "load": {
+                        "type": "string",
+                        "description": (
+                            "要加载的工具名（来自候选列表）。"
+                            "提供此参数时执行加载而非搜索"
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    }
+
 
 class ToolBridge:
     """Agent 与 MCP Server 之间的桥梁
@@ -59,6 +123,7 @@ class ToolBridge:
     - 工具调用 (委托给 MCPClient)
     - Schema 生成 (供 LLM function calling)
     - 调用追踪 (日志)
+    - 工具发现 (search_new_tools 元工具，可选)
 
     Args:
         agent_id: Agent 唯一 ID
@@ -66,6 +131,10 @@ class ToolBridge:
         allowed_tools: 授权的工具名称列表。空列表表示不限制。
         vault: ToolVault 实例 (可选, 启用工具发现模式)
         context: AgentToolContext 实例 (可选, 启用 Agent 侧上下文状态管理)
+        search_meta_tool: 是否提供 search_new_tools 工具发现元工具 (默认 False)。
+            启用后 to_openai_tools() 会附加该工具 schema（不受白名单限制），
+            call_tool() 对其本地拦截执行：语义搜索（Vault 向量/关键词）→
+            返回候选 → load=<工具名> 加载（自动授权 + 提升为 HOT）。
     """
 
     def __init__(
@@ -75,6 +144,7 @@ class ToolBridge:
         allowed_tools: list[str] | None = None,
         vault: ToolVault | None = None,
         context: AgentToolContext | None = None,
+        search_meta_tool: bool = False,
     ) -> None:
         self._agent_id = agent_id
         self._client = mcp_client
@@ -88,6 +158,8 @@ class ToolBridge:
         self._context = context
         # 召回确认闭环状态
         self._rejected_tools: set[str] = set()
+        # search_new_tools 元工具开关
+        self._search_meta_tool = search_meta_tool
 
     @property
     def agent_id(self) -> str:
@@ -136,6 +208,12 @@ class ToolBridge:
         Returns:
             MCPToolResult
         """
+        # search_new_tools 元工具 — 在本 Bridge 本地拦截执行，
+        # 不经过 MCPServer 路由（避免多 Agent 同名工具路由冲突），
+        # 也不受 allowed_tools 白名单限制（发现入口本身必须始终可用）。
+        if tool_name == SEARCH_NEW_TOOLS_NAME and self._search_meta_tool:
+            return await self._search_new_tools_impl(arguments)
+
         # 权限检查
         if not self._check_permission(tool_name):
             msg = f"权限拒绝: Agent '{self._agent_id}' 无权调用工具 '{tool_name}'"
@@ -182,6 +260,8 @@ class ToolBridge:
         同步方法 — 优先级: AgentToolContext > ToolVault > MCPClient。
         如果启用了 AgentToolContext，只返回 Agent 的热态工具。
         如果设置了 allowed_tools，则过滤。
+        启用 search_meta_tool 时，附加 search_new_tools 元工具
+        （工具发现入口，不受白名单限制）。
         """
         # 优先级: AgentToolContext > ToolVault > MCPClient
         if self._context is not None:
@@ -192,12 +272,21 @@ class ToolBridge:
             schemas = self._client.to_openai_tools()
 
         if self._allowed_tools is None:
-            return schemas
+            result = list(schemas)
+        else:
+            result = [
+                s for s in schemas
+                if s.get("function", {}).get("name", "") in self._allowed_tools
+            ]
 
-        return [
-            s for s in schemas
-            if s.get("function", {}).get("name", "") in self._allowed_tools
-        ]
+        # search_new_tools 元工具 — 始终对 LLM 可见（工具发现入口）
+        if self._search_meta_tool and not any(
+            s.get("function", {}).get("name") == SEARCH_NEW_TOOLS_NAME
+            for s in result
+        ):
+            result.append(_search_new_tools_schema())
+
+        return result
 
     def to_warm_summaries(self) -> list[dict[str, str]]:
         """生成温态工具摘要 (优先 AgentToolContext, 其次 Vault)"""
@@ -301,6 +390,206 @@ class ToolBridge:
         if self._vault is not None:
             return self._vault.advance_turn()
         return 0
+
+    # ------------------------------------------------------------------
+    # Vault 接入 (自动创建 Agent 侧上下文)
+    # ------------------------------------------------------------------
+
+    def attach_vault(
+        self,
+        vault: Any,  # ToolVault
+        essential_names: set[str] | None = None,
+    ) -> Any:  # AgentToolContext
+        """接入共享 ToolVault，并自动创建 Agent 侧 AgentToolContext
+
+        三级状态 (HOT/WARM/COLD) 由 Agent 侧上下文独立管理，
+        Vault 只存工具定义（不同 Agent 可拥有不同的上下文视图）。
+
+        必备工具 (永不回收) 规则:
+        - 显式传入的 essential_names (如 Master 的协调器工具)
+        - 当前白名单 allowed_tools（创建时被赋予的工具权限）
+        其余 Vault 工具初始为 HOT（可见性仍受白名单过滤）。
+        幂等：重复调用不会重建已有上下文。
+
+        Args:
+            vault: ToolVault 实例
+            essential_names: 额外的必备工具名称集合
+
+        Returns:
+            AgentToolContext 实例（已初始化）
+        """
+        from youmi.mcp.context import AgentToolContext
+
+        self._vault = vault
+        if self._context is None:
+            essential = set(essential_names or set())
+            if self._allowed_tools:
+                essential |= set(self._allowed_tools)
+
+            ctx = AgentToolContext(agent_id=self._agent_id, vault=vault)
+            ctx.init_tools(essential_names=essential)
+            self._context = ctx
+            logger.debug(
+                "ToolBridge[%s]: attached vault (%d tools, %d essential)",
+                self._agent_id, vault.tool_count, len(essential),
+            )
+        return self._context
+
+    # ------------------------------------------------------------------
+    # search_new_tools 元工具 (工具发现入口)
+    # ------------------------------------------------------------------
+
+    def _visible_tool_names(self) -> set[str]:
+        """当前 Agent 已可见的工具名集合（搜索时排除，避免重复推荐）
+
+        - 受限 Agent (allowed_tools 非空): 白名单即已可见集合
+        - 无限制 Agent: AgentToolContext / Vault 中所有 HOT 工具已在上下文中
+        """
+        if self._allowed_tools is not None:
+            return set(self._allowed_tools)
+        if self._context is not None:
+            return set(self._context.get_hot_tool_names())
+        if self._vault is not None:
+            return {e.tool_name for e in self._vault.get_hot_tools()}
+        return set()
+
+    async def _search_new_tools_impl(
+        self, arguments: dict[str, Any],
+    ) -> MCPToolResult:
+        """执行 search_new_tools 元工具 — 在本 Bridge 上执行，不经过 MCPServer
+
+        两种模式:
+        - 搜索: query + top_k → Vault 语义/关键词检索"当前不可见"的工具，
+          返回候选列表
+        - 加载: load=<工具名> → 授权（白名单）+ 提升为 HOT，下一轮即可调用
+        """
+        self._call_count += 1
+
+        # 加载模式
+        load_name = str(arguments.get("load") or "").strip()
+        if load_name:
+            return await self._load_discovered_tool(load_name)
+
+        # 搜索模式
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            return MCPToolResult.failure("参数错误: query 与 load 至少提供一个")
+        try:
+            top_k = int(arguments.get("top_k", 5))
+        except (TypeError, ValueError):
+            top_k = 5
+
+        exclude = self._visible_tool_names()
+        candidates: list[dict[str, Any]] = []
+
+        # 路径 1: ToolVault 语义搜索（向量 → 关键词回退）
+        # 注: 挂载了 ToolStore 时 search 不做 tier 过滤，
+        # 受限 Agent 也能发现 HOT 但未授权的工具
+        if self._vault is not None:
+            try:
+                results = await self._vault.search(
+                    query, top_k=top_k, min_score=0.2,
+                    exclude=exclude or None,
+                )
+                candidates = [
+                    {
+                        "name": r.tool_name,
+                        "score": round(r.score, 3),
+                        "summary": r.summary,
+                    }
+                    for r in results
+                ]
+            except Exception as exc:
+                logger.debug("ToolBridge[%s]: vault search failed: %s",
+                             self._agent_id, exc)
+
+        # 路径 2: 回退 — MCPClient 关键词匹配
+        # (无 Vault，或语义搜索无结果时；纯无限制模式无新工具可发现，跳过)
+        if not candidates and (
+            self._vault is not None or self._allowed_tools is not None
+        ):
+            try:
+                all_tools = await self._client.list_tools()
+                query_lower = query.lower()
+                for t in all_tools:
+                    if t.name in exclude:
+                        continue
+                    desc = (t.description or "").lower()
+                    # len>2 过滤英文停用词；中文双字词（最常见的词形态）
+                    # 含 CJK 字符时放行，避免被误杀
+                    if any(
+                        kw in desc or kw in t.name.lower()
+                        for kw in query_lower.split()
+                        if kw and (
+                            len(kw) > 2
+                            or any("\u4e00" <= c <= "\u9fff" for c in kw)
+                        )
+                    ):
+                        candidates.append({
+                            "name": t.name,
+                            "score": 0.5,
+                            "summary": (t.description or "")[:100],
+                        })
+            except Exception as exc:
+                logger.debug("ToolBridge[%s]: keyword fallback failed: %s",
+                             self._agent_id, exc)
+
+        candidates = candidates[:top_k]
+
+        payload: dict[str, Any] = {
+            "candidates": candidates,
+            "total": len(candidates),
+        }
+        if candidates:
+            payload["hint"] = (
+                "找到以上候选工具。如需使用，再次调用本工具并传 "
+                'load="<工具名>" 即可加载（自动授权并注入上下文）。'
+            )
+        else:
+            payload["message"] = "没有找到匹配的新工具，可尝试更换关键词描述。"
+
+        return MCPToolResult.success(json.dumps(payload, ensure_ascii=False))
+
+    async def _load_discovered_tool(self, tool_name: str) -> MCPToolResult:
+        """加载发现的工具: 授权 + 提升为 HOT
+
+        - 受限 Agent: 自动加入白名单（自我授权，记录日志；
+          正式审批流可后续接入 TOOL_REQUEST / ToolGuardian）
+        - Vault 模式: 提升为 HOT 使 schema 立即可见
+        """
+        # 存在性校验（Vault 条目或 Server 路由）
+        exists = self._vault is not None and tool_name in self._vault
+        if not exists:
+            try:
+                all_tools = await self._client.list_tools()
+                exists = any(t.name == tool_name for t in all_tools)
+            except Exception:
+                exists = True  # 校验失败不阻塞加载
+        if not exists:
+            return MCPToolResult.failure(
+                f"工具 '{tool_name}' 不存在，请从候选列表中选择"
+            )
+
+        # 授权: 加入白名单（受限 Agent）
+        if self._allowed_tools is not None:
+            self.add_allowed_tool(tool_name)
+            logger.info(
+                "ToolBridge[%s]: search_new_tools 授权新工具 '%s'",
+                self._agent_id, tool_name,
+            )
+
+        # 上下文: 提升为 HOT（复用 load_tool 的 context/vault 优先级）
+        promoted = await self.load_tool(tool_name)
+        if self._context is not None:
+            self._context.record_usage(tool_name)
+        elif self._vault is not None:
+            self._vault.record_usage(tool_name)
+
+        return MCPToolResult.success(json.dumps({
+            "loaded": tool_name,
+            "promoted_hot": promoted,
+            "message": f"工具 '{tool_name}' 已加载，现在可以直接调用。",
+        }, ensure_ascii=False))
 
     # ------------------------------------------------------------------
     # 权限管理

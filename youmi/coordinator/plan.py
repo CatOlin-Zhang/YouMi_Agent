@@ -89,6 +89,8 @@ class WorkflowStep(BaseModel):
     config_overrides: dict[str, Any] = Field(default_factory=dict)
     max_iterations: int = 20
     timeout_seconds: float = 0
+    retry_count: int = Field(default=2, description="步骤失败后最大重试次数")
+    retry_backoff: float = Field(default=2.0, description="指数退避基础秒数（每次重试乘以 2^attempt）")
 
     model_config = {"frozen": True}
 
@@ -293,6 +295,7 @@ class WorkflowExecutor:
         fail_fast: bool = True,
         on_step_start: Any = None,
         on_step_complete: Any = None,
+        default_timeout: float = 300.0,
     ) -> None:
         self._master = master_agent
         self._plan = plan
@@ -300,6 +303,7 @@ class WorkflowExecutor:
         self._fail_fast = fail_fast
         self._on_step_start = on_step_start
         self._on_step_complete = on_step_complete
+        self._default_timeout = default_timeout
 
         # 执行状态
         self._results: dict[str, StepResult] = {}
@@ -370,10 +374,13 @@ class WorkflowExecutor:
     async def _execute_layer_parallel(self, layer: list[str]) -> None:
         """并行执行一层中的步骤"""
         tasks = [self._execute_step(sid) for sid in layer]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sid, r in zip(layer, results):
+            if isinstance(r, Exception):
+                logger.error("Layer step '%s' raised unexpected exception: %s", sid, r)
 
     async def _execute_step(self, step_id: str) -> None:
-        """执行单个步骤"""
+        """执行单个步骤（含重试 + 超时兜底）"""
         step = self._get_step(step_id)
         if step is None:
             return
@@ -408,67 +415,96 @@ class WorkflowExecutor:
             except Exception:
                 logger.exception("on_step_start callback error (non-critical)")
 
-        try:
-            # 创建子 Agent
-            agent = self._master.create_sub_agent(
-                role=step.role,
-                name=step.name or step.role,
-                system_prompt=step.system_prompt,
-                task=step.task,
-                allowed_tools=step.allowed_tools,
-                env=step.env,
-                config_overrides={
-                    **step.config_overrides,
-                    "max_iterations": step.max_iterations,
-                } if step.config_overrides or step.max_iterations != 20 else step.config_overrides,
-            )
-            self._agents[step_id] = agent
-            result.agent_id = agent.agent_id
+        # 超时时长：优先步骤配置，否则使用执行器兜底超时
+        effective_timeout = step.timeout_seconds if step.timeout_seconds > 0 else self._default_timeout
 
-            # 初始化并执行
-            if agent.status == AgentStatus.CREATED:
-                await agent.initialize()
+        last_error: str | None = None
+        for attempt in range(step.retry_count + 1):
+            if attempt > 0:
+                backoff = step.retry_backoff * (2 ** (attempt - 1))
+                logger.warning(
+                    "Step '%s' retry %d/%d, backoff=%.1fs",
+                    step_id, attempt, step.retry_count, backoff,
+                )
+                await asyncio.sleep(backoff)
 
-            # 超时控制
-            if step.timeout_seconds > 0:
+            try:
+                # 创建子 Agent（重试时每次创建新实例）
+                agent = self._master.create_sub_agent(
+                    role=step.role,
+                    name=step.name or step.role,
+                    system_prompt=step.system_prompt,
+                    task=step.task,
+                    allowed_tools=step.allowed_tools,
+                    env=step.env,
+                    config_overrides={
+                        **step.config_overrides,
+                        "max_iterations": step.max_iterations,
+                    } if step.config_overrides or step.max_iterations != 20 else step.config_overrides,
+                )
+                self._agents[step_id] = agent
+                result.agent_id = agent.agent_id
+
+                # 初始化并执行
+                if agent.status == AgentStatus.CREATED:
+                    await agent.initialize()
+
+                # 超时控制（兜底超时保证步骤不会无限阻塞）
                 task_result = await asyncio.wait_for(
                     agent.run(task=step.task, task_id=step_id),
-                    timeout=step.timeout_seconds,
+                    timeout=effective_timeout,
                 )
-            else:
-                task_result = await agent.run(task=step.task, task_id=step_id)
 
-            result.task_result = task_result
-            result.status = (
-                StepStatus.COMPLETED if task_result.success
-                else StepStatus.FAILED
-            )
-            result.error = task_result.error
+                result.task_result = task_result
+                result.status = (
+                    StepStatus.COMPLETED if task_result.success
+                    else StepStatus.FAILED
+                )
+                result.error = task_result.error
 
-        except asyncio.TimeoutError:
+                if task_result.success:
+                    # 成功则退出重试循环
+                    break
+
+                # 任务本身失败（非异常），记录错误后继续重试
+                last_error = task_result.error
+                logger.warning(
+                    "Step '%s' task failed (attempt %d/%d): %s",
+                    step_id, attempt + 1, step.retry_count + 1, last_error,
+                )
+
+            except asyncio.TimeoutError:
+                last_error = f"步骤超时 ({effective_timeout}s)"
+                logger.error(
+                    "Step '%s' timed out after %.0fs (attempt %d/%d)",
+                    step_id, effective_timeout, attempt + 1, step.retry_count + 1,
+                )
+
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.exception(
+                    "Step '%s' raised exception (attempt %d/%d): %s",
+                    step_id, attempt + 1, step.retry_count + 1, exc,
+                )
+
+        else:
+            # 全部重试耗尽，以 last_error 标记最终失败
             result.status = StepStatus.FAILED
-            result.error = f"步骤超时 ({step.timeout_seconds}s)"
-            logger.error("Step '%s' timed out after %.0fs", step_id, step.timeout_seconds)
+            result.error = last_error
 
-        except Exception as exc:
-            result.status = StepStatus.FAILED
-            result.error = f"{type(exc).__name__}: {exc}"
-            logger.exception("Step '%s' failed: %s", step_id, exc)
+        import time as _time
+        result.finished_at = _time.time()
 
-        finally:
-            import time
-            result.finished_at = time.time()
+        if self._on_step_complete:
+            try:
+                await self._on_step_complete(step, result)
+            except Exception:
+                logger.exception("on_step_complete callback error (non-critical)")
 
-            if self._on_step_complete:
-                try:
-                    await self._on_step_complete(step, result)
-                except Exception:
-                    logger.exception("on_step_complete callback error (non-critical)")
-
-            logger.info(
-                "Step '%s' finished: status=%s duration=%.1fs",
-                step_id, result.status.value, result.duration,
-            )
+        logger.info(
+            "Step '%s' finished: status=%s duration=%.1fs",
+            step_id, result.status.value, result.duration,
+        )
 
     def _get_step(self, step_id: str) -> WorkflowStep | None:
         """获取步骤定义"""

@@ -51,11 +51,18 @@ async def create_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
     # ---- 参数校验：role 和 task 都不能为空 ----
     if not role or not role.strip():
         return json.dumps({
-            "error": "参数错误：role 不能为空。请先调用 list_available_roles 查看可用角色，再指定合适的 role。",
+            "error": (
+                "参数错误：调用 create_sub_agent 时必须提供非空的 role。"
+                "请直接指定角色名称，例如：create_sub_agent({\"role\": \"researcher\", \"task\": \"调研HBM行业现状\"})。"
+                "不需要先调用 list_available_roles。"
+            ),
         }, ensure_ascii=False)
     if not task or not task.strip():
         return json.dumps({
-            "error": f"参数错误：task 不能为空。请为 {role} 指定具体的任务描述。",
+            "error": (
+                f"参数错误：调用 create_sub_agent(role='{role}') 时必须提供非空的 task。"
+                "请补充具体任务描述，例如：create_sub_agent({\"role\": \"researcher\", \"task\": \"调研HBM行业现状\"})。"
+            ),
         }, ensure_ascii=False)
 
     # 获取 GUI 工作流追踪器（如果存在）
@@ -129,6 +136,16 @@ async def run_sub_agent(master: MasterAgent, **kwargs: Any) -> str:
     """
     agent_id = kwargs.get("agent_id", "")
 
+    # 参数校验：agent_id 不能为空
+    if not agent_id or not str(agent_id).strip():
+        return json.dumps({
+            "error": (
+                "参数错误：调用 run_sub_agent 时必须提供非空的 agent_id。"
+                "请先调用 create_sub_agent 创建子 Agent，然后用返回的 agent_id 运行。"
+                "示例：run_sub_agent({\"agent_id\": \"abc123\"})"
+            ),
+        }, ensure_ascii=False)
+
     # 获取 GUI 工作流追踪器
     tracker = getattr(master, '_gui_bridge', None)
     tracker = getattr(tracker, 'tracker', None) if tracker else None
@@ -178,21 +195,26 @@ async def list_sub_agents(master: MasterAgent, **kwargs: Any) -> str:
 
 
 async def list_available_roles(master: MasterAgent, **kwargs: Any) -> str:
-    """列出所有已配置的 Agent 角色（在 youmi/agents/ 目录中有配置的）。
+    """列出已预配置的 Agent 角色，并说明可以自由创建任意角色。
 
     Args:
         master: MasterAgent 实例
 
     Returns:
-        JSON 字符串，包含可用角色列表
+        JSON 字符串，包含预配置角色列表和自由创建说明
     """
     from youmi.agents import list_agents
 
     roles = list_agents()
     logger.info("Tool list_available_roles: %s", roles)
     return json.dumps({
-        "available_roles": roles,
-        "description": "这些角色在 youmi/agents/ 中有配置文件，可以直接用 create_sub_agent 创建",
+        "preconfigured_roles": roles,
+        "description": (
+            "以上是拥有预配置文件的角色。"
+            "你也可以用 create_sub_agent 自由创建任意角色的子 Agent"
+            "（指定 role 名称即可，无需预配置，系统会自动生成默认配置）。"
+            "例如：researcher、coder、reviewer、analyst 等。"
+        ),
     }, ensure_ascii=False)
 
 
@@ -252,23 +274,29 @@ CREATE_SUB_AGENT_DEF = ToolDefinition(
     name="create_sub_agent",
     description=(
         "创建一个新的子 Agent 来执行特定任务。"
-        "指定角色和任务描述，可用角色通过 list_available_roles 查询。"
+        "你可以直接指定任意角色名称（如 researcher、coder、analyst 等），"
+        "不限于预配置角色，也无需先调用 list_available_roles。"
         "创建后需要调用 run_sub_agent 来让它执行任务。"
         "注意：子 Agent 拥有自己的能力和工具，会自行实现细节；"
         "task 只需说明目标与要求，不要把完整代码或文件内容放进 task。"
+        "主流程已改为 Plan-then-Execute 自动编排，通常无需手动调用此工具。"
+        "示例：create_sub_agent({\"role\": \"researcher\", \"task\": \"调研HBM行业现状\"})"
     ),
     parameters=[
         ToolParameter(
             name="role",
             type="string",
-            description="Agent 角色标识，通过 list_available_roles 获取可用值",
+            description=(
+                "Agent 角色标识（必填）。任意字符串，如 coder、researcher、analyst、writer、planner。"
+                "可直接创建任何新角色，无需预配置或先查询 list_available_roles。"
+            ),
             required=True,
         ),
         ToolParameter(
             name="task",
             type="string",
             description=(
-                "分配给子 Agent 的任务描述：简明扼要的自然语言指令"
+                "分配给子 Agent 的任务描述（必填）。简明扼要的自然语言指令"
                 "（建议不超过 200 字），说明目标、要求与验收标准即可。"
                 "禁止在 task 中包含完整代码、文件内容或超长规格——"
                 "子 Agent 会自行实现细节。"
@@ -297,12 +325,13 @@ RUN_SUB_AGENT_DEF = ToolDefinition(
     description=(
         "运行指定的子 Agent，让它执行已分配的任务并返回结果。"
         "必须先通过 create_sub_agent 创建后才能运行。"
+        "示例：run_sub_agent({\"agent_id\": \"abc123\"})"
     ),
     parameters=[
         ToolParameter(
             name="agent_id",
             type="string",
-            description="要运行的子 Agent ID（从 create_sub_agent 返回）",
+            description="要运行的子 Agent ID（必填，字符串）。从 create_sub_agent 返回的 agent_id。",
             required=True,
         ),
     ],
@@ -316,7 +345,11 @@ LIST_SUB_AGENTS_DEF = ToolDefinition(
 
 LIST_AVAILABLE_ROLES_DEF = ToolDefinition(
     name="list_available_roles",
-    description="列出所有已配置的 Agent 角色（在 youmi/agents/ 目录中有配置的），可用于 create_sub_agent 的 role 参数。",
+    description=(
+        "可选工具：列出已预配置的 Agent 角色（拥有专属配置文件的角色）。"
+        "通常情况下无需调用，因为 create_sub_agent 支持自由创建任意角色。"
+        "仅在用户明确要求查看可用角色时使用。"
+    ),
     parameters=[],
 )
 

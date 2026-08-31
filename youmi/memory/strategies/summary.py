@@ -91,6 +91,17 @@ class SummaryMemoryStrategy(MemoryStrategy):
         self._messages.clear()
         self._summary = None
 
+    async def search(self, query: str, top_k: int = 5) -> list[dict[str, str]]:
+        """关键词检索摘要 + 保留的消息 (P6)"""
+        candidates: list[dict[str, str]] = []
+        if self._summary:
+            candidates.append({
+                "role": "system",
+                "content": f"[历史对话摘要]\n{self._summary}",
+            })
+        candidates.extend(self._messages)
+        return MemoryStrategy.keyword_search(candidates, query, top_k)
+
     async def on_session_end(self) -> None:
         """会话结束时，对所有消息生成最终摘要"""
         if self._llm_call and self._messages:

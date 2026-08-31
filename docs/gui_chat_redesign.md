@@ -2,7 +2,9 @@
 
 > **目标**：在**不改动核心引擎**的前提下，将 GUI 从现有 Streamlit「群聊 v3」重做为 **QQ/微信风格的 Web 应用**。
 > **隐喻**：单聊 = 与单个 Agent 对话；群聊 = 多个 Agent 协作，每个 Agent 是群里的「成员」，发言以独立气泡呈现。
-> **状态**：**已确认**，进入实现阶段。
+> **状态**：✅ **已实现**（M1–M4 全部完成，含 MCPService + InProcessBroker 深度集成）
+>
+> 详细实现说明见 [GUI_Introduction.md](details/GUI_Introduction.md)
 
 ---
 
@@ -154,3 +156,25 @@
 - 无需改动 `_subprocess_entry.py`，隔离子 Agent 代码零侵入
 
 *所有决策已确认，按 M1→M4 实现可运行 MVP，M5 视需求迭代。*
+
+---
+
+## 11. 实现状态（已完成 vs 设计变更）
+
+| 里程碑 | 原设计 | 实际实现 | 状态 |
+|--------|--------|---------|------|
+| M1 后端骨架 | server.py 启动；引擎持有；静态服务；WS 联通 | `gui/server.py` + `gui/engine/bridge.py`（aiohttp）| ✅ |
+| M2 单聊闭环 | 单聊：发送 → 流式气泡 → 持久化历史 | `EngineBridge.send_user_message()` + `Store.save_message()` | ✅ |
+| M3 群聊 + Hooks | GUI Hook；逐 Agent 独立气泡；agent_join；工具调用卡片 | `GUIHooks`（MESSAGE_SENDING/BEFORE_TOOL_CALL/AFTER_TOOL_CALL）| ✅ |
+| M4 UI 打磨 | QQ/微信视觉、头像、未读角标、会话切换、历史重载 | `gui/static/`（9 个文件，微信绿 #07C160 / QQ 蓝 #12B7F5）| ✅ |
+| M5 增强（可选）| Agent 详情/工具抽屉、sqlite 持久化 | 工具面板已实现（`/api/tools` + `panels.js`）；sqlite 持久化待定 | 🔲 部分 |
+
+**与原设计的主要差异**：
+
+1. **文件结构拆分**：原设计 `server.py` 单文件承担全部职责，实际拆分为 `engine/bridge.py`（引擎适配）、`engine/hook_bridge.py`（Hook 桥接）、`engine/mcp_service.py`（MCP 一体化）、`hub/ws_hub.py`（WebSocket 管理）、`persistence/store.py`（持久化）等多个专职模块。
+2. **MCPService 深度集成**：原设计未规划 MCP 层 GUI 接入，实际实现 `MCPService`（ToolStore + ToolVault + EmbeddingClient + sqlite-vec），所有 Agent 共享工具向量库。
+3. **消息总线集成**：`EngineBridge.init()` 创建 `InProcessBroker`，Master 与所有子 Agent 自动接入，工具申请（TOOL_REQUEST/TOOL_RESPONSE）通过总线路由。
+4. **`app.js` 拆分为 9 个文件**：`app.js` / `chat-renderer.js` / `session-panel.js` / `panels.js` / `modal.js` / `state.js` / `ui.js` / `ws.js` + `style.css`，职责更清晰。
+5. **Mock 模式**：新增 `mock_engine.py`，无 LLM 时可演示全部 GUI 功能。
+6. **`typing` 事件**：原设计包含「正在输入…」事件，实际实现中暂未加入（WebSocket 事件协议中无此事件）。
+7. **旧版 `streamlit_app.py`**：已不再维护，实际已被 aiohttp 版本替代。

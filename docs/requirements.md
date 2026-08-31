@@ -1,138 +1,124 @@
-# YouMi Agent — 多Agent协作框架 需求文档
+# YouMi Agent — 多 Agent 协作框架 需求文档
 
-> 版本: v0.1.0 (初始草案)
-> 创建日期: 2026-08-04
+> 版本：v0.6.0（需求状态与代码对齐，对应 Phase 6 全局记忆闭环落地）
+> 更新日期：2026-08-31
+> 原始草案：v0.1.0（2026-08-04）
 
 ---
 
 ## 1. 项目概述
 
-YouMi Agent 是一个多Agent协作框架，旨在根据用户任务**自动实例化Agent**，并为每个Agent**动态装载技能(Skill)与工具(Tool)**，通过**统一的MCP服务器**实现无脚本工具调用，同时为每个Agent**独立管理记忆(Memory)**，从而实现灵活、可扩展的智能任务协作系统。
+YouMi Agent 是一个多 Agent 协作框架，由 `MasterAgent` 编排层接收用户任务，**自动创建子 Agent**，通过 **MCP 工具层**（Server/Client/Vault/Store）统一暴露和管理工具，为每个 Agent **独立管理记忆**，并通过 **消息总线**（WorkflowMessage + InProcessBroker）实现 Agent 间通信，从而实现灵活、可扩展的智能任务协作系统。
 
-### 1.1 核心设计目标
+### 1.1 核心设计目标与实现状态
 
-| 目标 | 描述 |
-|------|------|
-| **任务驱动的Agent实例化** | 根据用户提交的任务自动分析、拆解，并创建对应的Agent实例 |
-| **动态Skill/Tool装载** | 按需为每个Agent装载所需的技能与工具，避免冗余加载 |
-| **统一MCP工具服务** | 通过MCP(Model Context Protocol)服务器统一暴露工具，Agent无需本地脚本即可调用 |
-| **独立记忆管理** | 每个Agent拥有独立的记忆空间，支持短期/长期记忆的持久化与检索 |
-| **多Agent协作** | Agent之间可通信、协调，共同完成复杂任务 |
+| 目标 | 描述 | 状态 |
+|------|------|------|
+| **任务驱动的 Agent 实例化** | 根据用户提交的任务自动分析、拆解，并创建对应的 Agent 实例 | ✅ MasterAgent.create_sub_agent() |
+| **统一 MCP 工具服务** | 通过 MCP 协议统一暴露工具，Agent 通过 ToolBridge 调用 | ✅ MCPServer/Client/Bridge |
+| **独立记忆管理** | 每个 Agent 拥有独立的 MemoryManager，支持多种策略与后端 | ✅ MemoryManager + Strategy + Backend |
+| **多 Agent 协作** | Agent 间通过消息总线通信，MasterAgent 调度协作 | ✅ InProcessBroker + WorkflowPlan |
+| **工具经验积累** | 跨任务沉淀工具使用经验，供 ToolGuardian 诊断修复 | ✅ GlobalMemory + PostTaskPipeline |
 
 ---
 
-## 2. 系统架构概览
+## 2. 系统架构概览（真实）
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      用户接口层                          │
-│                  (CLI / API / Web UI)                    │
-└──────────────────────┬──────────────────────────────────┘
-                       │ 用户任务
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│                   任务编排层 (Orchestrator)               │
-│  ┌───────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ 任务分析器 │  │ Agent工厂    │  │ 协作调度器       │  │
-│  │ (Analyzer)│  │ (AgentFactory)│  │ (Coordinator)   │  │
-│  └───────────┘  └──────────────┘  └─────────────────┘  │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│                   Agent 运行时层                         │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
-│  │  Agent 实例 A │ │  Agent 实例 B │ │  Agent 实例 C │   │
-│  │ ┌──────────┐ │ │ ┌──────────┐ │ │ ┌──────────┐ │    │
-│  │ │  Skills  │ │ │ │  Skills  │ │ │ │  Skills  │ │    │
-│  │ │  Tools   │ │ │ │  Tools   │ │ │ │  Tools   │ │    │
-│  │ │  Memory  │ │ │ │  Memory  │ │ │ │  Memory  │ │    │
-│  │ └──────────┘ │ │ └──────────┘ │ │ └──────────┘ │    │
-│  └──────────────┘ └──────────────┘ └──────────────┘    │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│                   基础设施层                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ MCP Server   │  │ Memory Store │  │ Skill Registry│ │
-│  │ (统一工具网关)│  │ (记忆存储)    │  │ (技能注册中心) │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│              用户接口层                             │
+│        Web GUI (aiohttp) / Python API              │
+└───────────────────┬──────────────────────────────┘
+                    │ 用户任务
+                    ▼
+┌──────────────────────────────────────────────────┐
+│              编排层 (coordinator/)                 │
+│  MasterAgent  WorkflowPlan  HandoffProtocol       │
+│  ToolGuardianAgent  PostTaskPipeline              │
+└───────────────────┬──────────────────────────────┘
+                    │ 创建 & 调度 SubAgent
+                    ▼
+┌──────────────────────────────────────────────────┐
+│           Agent 运行时 (core/)                     │
+│  Agent + ReAct循环  LLMClient  ToolBridge         │
+│  MemoryManager  HookRegistry  PromptAssembler     │
+└────┬──────────────┬─────────────────┬────────────┘
+     │              │                 │
+┌────▼────┐  ┌──────▼──────┐  ┌──────▼────────┐
+│  MCP 层  │  │  记忆层      │  │  全局知识层    │
+│ Vault   │  │ Strategy    │  │ GlobalMemory  │
+│ Store   │  │ Backend     │  │ KnowledgeEntry│
+│ Approval│  │ Compactor   │  │ ExperienceExt │
+└─────────┘  └─────────────┘  └───────────────┘
 ```
 
 ---
 
 ## 3. 功能需求
 
-### 3.1 任务驱动的Agent自动实例化
+### 3.1 任务驱动的 Agent 自动实例化
 
-**描述**: 系统接收用户任务后，自动分析任务需求，决定需要哪些Agent角色，并实例化它们。
+| 需求 ID | 描述 | 实现状态 |
+|---------|------|---------|
+| **F1.1** | 系统接收自然语言任务，分析所需 Agent 角色 | ✅ MasterAgent 内置任务分析推理 |
+| **F1.2** | 任务拆解包含：Agent 角色列表、职责、工具需求 | ✅ WorkflowPlan 步骤定义 |
+| **F1.3** | 提供 Agent 工厂，根据角色自动创建 Agent 实例 | ✅ `create_sub_agent(name, role, task)` |
+| **F1.4** | Agent 实例包含唯一标识、角色、初始工具集 | ✅ AgentConfig（agent_id / role / allowed_tools）|
+| **F1.5** | 支持预定义 Agent 角色模板 | ✅ YAML config.yaml（youmi/agents/）|
+| **F1.6** | 支持用户自定义 Agent 角色模板 | ✅ YAML 声明式扩展 |
 
-**详细需求**:
+### 3.2 工具管理（原「动态 Skill 与 Tool 装载」）
 
-- **F1.1** 系统应提供任务分析器(Analyzer)，接收自然语言描述的任务，输出任务拆解结果
-- **F1.2** 任务拆解结果应包含：所需Agent角色列表、各角色职责描述、所需Skill/Tool清单
-- **F1.3** 系统应提供Agent工厂(AgentFactory)，根据角色描述自动创建Agent实例
-- **F1.4** Agent实例应包含唯一标识、角色定义、初始Skill集合、初始Tool集合
-- **F1.5** 支持预定义Agent角色模板(如: Coder、Reviewer、Researcher等)
-- **F1.6** 支持用户自定义Agent角色模板
+> 注：框架中无独立 Skill 模块，工具通过 MCP 协议统一注册，按三级状态（HOT/WARM/COLD）动态管理。
 
-### 3.2 动态Skill与Tool装载
+| 需求 ID | 描述 | 实现状态 |
+|---------|------|---------|
+| **F2.1** | 维护全局工具注册中心，管理所有可用工具 | ✅ ToolVault + ToolStore（SQLite）|
+| **F2.2** | 工具定义包含：名称、描述、参数 Schema | ✅ MCPServer 工具注册 + BuiltinToolProvider |
+| **F2.3** | Agent 可在运行时动态加载/卸载工具 | ✅ ToolBridge + AgentToolContext（HOT/WARM/COLD）|
+| **F2.4** | 工具语义搜索，按需为 Agent 补充工具 | ✅ ToolVault.search() + EmbeddingClient + sqlite-vec |
+| **F2.5** | 工具版本管理与变更日志 | ✅ ToolStore（version/parent_version_id/tool_changelogs）|
+| **F2.6** | 工具调用超时控制 | 🔲 仅 shell_exec 有超时，其他工具未统一 |
+| **F2.7** | Skill 模块（声明式技能组合） | 🔲 未实现（Phase 5，见路线图）|
 
-**描述**: 系统根据任务需要，为每个Agent动态装载所需的技能与工具。
+### 3.3 统一 MCP 工具服务
 
-**详细需求**:
-
-- **F2.1** 系统应维护一个全局Skill注册中心(Skill Registry)，管理所有可用的Skill定义
-- **F2.2** 系统应维护一个全局Tool注册中心(Tool Registry)，管理所有可用的Tool定义
-- **F2.3** Skill定义应包含：名称、描述、输入输出格式、依赖的Tool列表、执行逻辑
-- **F2.4** Tool定义应包含：名称、描述、MCP服务端点、参数Schema、返回Schema
-- **F2.5** Agent实例可在运行时动态加载/卸载Skill和Tool
-- **F2.6** 装载过程应检查依赖关系，自动装载所需的间接依赖
-- **F2.7** 支持Skill/Tool的版本管理与兼容性检查
-
-### 3.3 统一MCP服务器
-
-**描述**: 通过统一的MCP(Model Context Protocol)服务器暴露所有工具能力，Agent无需本地脚本即可远程调用工具。
-
-**详细需求**:
-
-- **F3.1** 系统应提供一个统一的MCP Server，作为所有工具调用的网关
-- **F3.2** MCP Server应实现标准MCP协议，支持工具发现、工具描述、工具调用
-- **F3.3** 所有Tool通过MCP Server统一注册与暴露，Agent通过MCP客户端协议调用
-- **F3.4** MCP Server应支持工具的认证与鉴权，控制不同Agent的工具访问权限
-- **F3.5** MCP Server应提供工具调用的日志记录与监控
-- **F3.6** 支持工具的插件化扩展，新增Tool无需修改MCP Server核心代码
-- **F3.7** MCP Server应支持工具调用的超时控制与重试机制
+| 需求 ID | 描述 | 实现状态 |
+|---------|------|---------|
+| **F3.1** | 提供统一 MCPServer，作为工具调用网关 | ✅ `youmi/mcp/server.py` |
+| **F3.2** | 实现标准 MCP 协议（工具发现/描述/调用）| ✅ JSON-RPC 协议 + `protocol.py` |
+| **F3.3** | 所有工具通过 MCPServer 统一注册，Agent 通过 MCPClient 调用 | ✅ LocalFunctionProvider + BuiltinToolProvider |
+| **F3.4** | 工具访问权限控制（三级审批） | ✅ ApprovalManager（AUTO/MANUAL/MASTER）|
+| **F3.5** | 工具调用日志记录 | ✅ Hook（BEFORE/AFTER_TOOL_CALL）+ 审批审计日志 |
+| **F3.6** | 工具插件化扩展 | ✅ ToolProvider 抽象接口 |
+| **F3.7** | 统一超时控制与重试 | 🔲 未统一实现 |
 
 ### 3.4 独立记忆管理
 
-**描述**: 每个Agent拥有独立的记忆空间，支持短期记忆(对话上下文)和长期记忆(持久化知识)。
+| 需求 ID | 描述 | 实现状态 |
+|---------|------|---------|
+| **F4.1** | 每个 Agent 拥有独立的记忆空间，彼此隔离 | ✅ MemoryManager（per-agent）|
+| **F4.2** | 支持短期记忆（会话上下文） | ✅ FullMemoryStrategy / SummaryMemoryStrategy / LSTMMemoryStrategy |
+| **F4.3** | 支持长期记忆（跨任务知识积累） | ✅ GlobalMemory（工具经验，仅供 ToolGuardian）|
+| **F4.4** | 记忆向量语义检索 | ✅ MemoryManager.search() + EmbeddingClient |
+| **F4.5** | 记忆写入/读取/持久化/归档 | ✅ SQLiteBackend / FileBackend |
+| **F4.6** | 超 token 时自动压缩上下文 | ✅ ContextCompactor |
+| **F4.7** | 可插拔记忆后端 | ✅ PersistenceBackend 抽象接口（SQLite/File）|
+| **F4.8** | Agent 间共享记忆 | 🔲 GlobalMemory 仅供 ToolGuardian，暂无通用共享记忆空间 |
 
-**详细需求**:
+### 3.5 多 Agent 协作
 
-- **F4.1** 每个Agent实例应拥有独立的记忆存储空间，彼此隔离
-- **F4.2** 记忆系统应支持两类记忆：
-  - **短期记忆**: 当前任务的对话上下文、中间推理结果
-  - **长期记忆**: 跨任务的知识积累、用户偏好、经验总结
-- **F4.3** 记忆系统应支持向量检索，允许Agent按语义相似度检索历史记忆
-- **F4.4** 记忆系统应支持记忆的写入、读取、更新、删除、归档操作
-- **F4.5** Agent可在协作过程中选择性地将信息写入共享记忆空间
-- **F4.6** 记忆存储应支持可插拔后端(如: SQLite、Redis、向量数据库等)
-
-### 3.5 多Agent协作
-
-**描述**: 多个Agent实例之间能够通信、协调，共同完成复杂任务。
-
-**详细需求**:
-
-- **F5.1** 系统应提供Agent间消息传递机制，支持点对点与广播
-- **F5.2** 协作调度器(Coordinator)负责管理Agent间的任务依赖与执行顺序
-- **F5.3** 支持顺序执行、并行执行、条件分支等多种协作模式
-- **F5.4** Agent可将子任务委托给其他Agent执行
-- **F5.5** 支持Agent执行过程中的异常处理与任务重试
-- **F5.6** 协作过程应提供可观测性(日志、状态追踪、执行时间线)
+| 需求 ID | 描述 | 实现状态 |
+|---------|------|---------|
+| **F5.1** | Agent 间消息传递（点对点 + 广播）| ✅ InProcessBroker + WorkflowMessage |
+| **F5.2** | 调度器管理任务依赖与执行顺序 | ✅ WorkflowPlan + WorkflowExecutor（DAG）|
+| **F5.3** | 支持顺序/并行执行模式 | ✅ WorkflowExecutor(mode="serial"|"parallel") |
+| **F5.4** | Agent 可委托子任务给其他 Agent | ✅ HandoffProtocol + request_tool() |
+| **F5.5** | 异常处理（工具修复闭环） | ✅ ToolGuardianAgent + FixStrategiesMixin |
+| **F5.6** | 可观测性（日志 + 状态追踪） | ✅ Hook 系统 + AgentStatus + WorkflowTracker（GUI）|
+| **F5.7** | 进程隔离执行 | ✅ SubProcessAgentRunner（asyncio 子进程）|
+| **F5.8** | 工具申请流程（子 Agent 申请新工具）| ✅ TOOL_REQUEST/TOOL_RESPONSE 消息类型 |
+| **F5.9** | 层级架构（Sub-Master） | 🔲 未实现（Phase 7，见路线图）|
 
 ---
 
@@ -140,77 +126,84 @@ YouMi Agent 是一个多Agent协作框架，旨在根据用户任务**自动实�
 
 ### 4.1 可扩展性
 
-- **NF1.1** 框架应采用插件化架构，核心模块可被替换或扩展
-- **NF1.2** 新增Agent角色、Skill、Tool不应需要修改框架核心代码
-- **NF1.3** 支持水平扩展，可同时运行大量Agent实例
+| 需求 ID | 描述 | 状态 |
+|---------|------|------|
+| **NF1.1** | 插件化架构，核心模块可被替换或扩展 | ✅ Plugin / MemoryStrategy / PersistenceBackend 均为可替换插件 |
+| **NF1.2** | 新增 Agent 角色、Tool 不需修改框架核心代码 | ✅ YAML 声明 + ToolProvider 扩展 |
+| **NF1.3** | 水平扩展，支持同时运行大量 Agent 实例 | 🔲 单机单进程（容器化/多 Worker 未实现）|
 
 ### 4.2 可靠性
 
-- **NF2.1** Agent执行失败时应支持自动重试与优雅降级
-- **NF2.2** MCP Server应具备高可用性，支持故障恢复
-- **NF2.3** 记忆存储应具备持久性，避免数据丢失
+| 需求 ID | 描述 | 状态 |
+|---------|------|------|
+| **NF2.1** | LLM 调用重试与退避 | 🔲 未实现（P0 优先级）|
+| **NF2.2** | 持久化任务队列（崩溃恢复） | 🔲 消息总线为内存态 |
+| **NF2.3** | 记忆数据持久性 | ✅ SQLiteBackend / FileBackend |
+| **NF2.4** | 工具修复后自动版本更新 | ✅ PostTaskPipeline 阈值触发 trigger_tool_version_update() |
+| **NF2.5** | 优雅降级（向量化/LLM 失败时降级）| ✅ 全链路均有降级路径 |
 
 ### 4.3 安全性
 
-- **NF3.1** Agent的工具调用应受权限控制，遵循最小权限原则
-- **NF3.2** MCP Server应支持身份认证与传输加密
-- **NF3.3** 敏感记忆数据应支持加密存储
+| 需求 ID | 描述 | 状态 |
+|---------|------|------|
+| **NF3.1** | 工具调用权限控制，最小权限原则 | ✅ 三级审批（AUTO/MANUAL/MASTER）|
+| **NF3.2** | 总线认证与传输安全 | 🔲 BusServer 无认证（P0 优先级）|
+| **NF3.3** | 执行沙箱 | 🔲 shell_ops 无隔离（P0 优先级）|
 
 ### 4.4 可观测性
 
-- **NF4.1** 框架应提供完整的执行日志，记录Agent决策过程与工具调用链路
-- **NF4.2** 支持Agent执行状态的实时监控
-- **NF4.3** 提供任务执行的追踪(Tracing)能力，便于调试与优化
+| 需求 ID | 描述 | 状态 |
+|---------|------|------|
+| **NF4.1** | 完整执行日志（Agent 决策 + 工具调用链路）| ✅ Hook 系统 + logging |
+| **NF4.2** | Agent 执行状态实时监控 | ✅ AgentStatus + GUI WorkflowTracker |
+| **NF4.3** | 分布式追踪（OpenTelemetry）| 🔲 未实现（P0 优先级）|
+| **NF4.4** | 审计日志 | ✅ ApprovalManager 审批审计日志 |
 
 ---
 
-## 5. 技术选型建议
+## 5. 技术选型（实际）
 
-| 组件 | 建议技术 | 说明 |
+| 组件 | 实际技术 | 说明 |
 |------|---------|------|
-| 开发语言 | Python 3.10+ | 与AI生态兼容性最佳 |
-| Agent运行时 | 自研轻量运行时 | 基于asyncio的异步事件驱动 |
-| MCP协议 | MCP SDK (官方Python SDK) | 遵循MCP标准协议 |
-| LLM接口 | OpenAI / 兼容API | 支持多模型后端 |
-| 记忆存储 | SQLite + 向量数据库 | 短期用SQLite，长期用向量检索 |
-| 任务编排 | 自研DAG调度器 | 支持条件分支与并行 |
-| 配置管理 | YAML / TOML | Agent角色与Skill声明式配置 |
-| 日志/追踪 | logging + OpenTelemetry | 结构化日志与分布式追踪 |
+| 开发语言 | Python 3.10+ | asyncio 全栈 |
+| Agent 运行时 | 自研（youmi/core/） | ReAct 循环 + Hook + Plugin |
+| MCP 协议 | 自研 JSON-RPC 实现 | youmi/mcp/（Server/Client/Bridge）|
+| LLM 接口 | OpenAI 兼容 API / Ollama | LLMClient 支持多 provider |
+| 工具持久化 | SQLite + sqlite-vec | ToolStore（6 张表 + 向量索引）|
+| 会话记忆 | SQLite / JSON 文件 | SQLiteBackend / FileBackend |
+| 全局知识库 | SQLite + sqlite-vec | GlobalMemory（向量语义检索）|
+| 任务编排 | 自研 DAG 调度器 | WorkflowPlan + WorkflowExecutor |
+| 消息总线 | asyncio.Queue（进程内）| InProcessBroker + BusServer/Client |
+| GUI | aiohttp + 原生 HTML/CSS/JS | WebSocket + REST 双模式 |
+| 配置管理 | YAML | Agent 角色 config.yaml |
 
 ---
 
-## 6. 项目里程碑(初步)
+## 6. 已完成里程碑
 
-| 阶段 | 内容 | 预计产出 |
-|------|------|---------|
-| **M1 - 基础框架** | 项目骨架搭建、Agent基础类、Skill/Tool注册机制 | 可运行的单Agent示例 |
-| **M2 - MCP集成** | MCP Server搭建、工具注册与调用链路 | Agent通过MCP调用工具 |
-| **M3 - 记忆系统** | 记忆存储、检索、隔离机制 | Agent具备记忆能力 |
-| **M4 - 多Agent协作** | 任务编排、Agent间通信、协作调度 | 多Agent完成复杂任务 |
-| **M5 - 自动实例化** | 任务分析、Agent工厂、动态装载 | 端到端自动化流程 |
-| **M6 - 优化与打磨** | 性能优化、安全加固、可观测性完善 | 生产可用版本 |
-
----
-
-## 7. 术语表
-
-| 术语 | 定义 |
-|------|------|
-| **Agent** | 由LLM驱动的自主实体，具备特定角色、技能和工具，可独立执行任务 |
-| **Skill** | Agent的一项能力定义，描述如何完成特定子任务，可组合多个Tool |
-| **Tool** | 可通过MCP协议调用的外部能力(如搜索、代码执行、文件操作等) |
-| **MCP** | Model Context Protocol，模型上下文协议，用于LLM与工具之间的标准化通信 |
-| **Memory** | Agent的记忆空间，存储对话上下文、知识和经验 |
-| **Orchestrator** | 任务编排器，负责分析任务、创建Agent、调度协作流程 |
-| **Coordinator** | 协作调度器，管理Agent间的通信、依赖与执行顺序 |
+| 里程碑 | 核心交付 | 状态 |
+|--------|---------|------|
+| **P1 — 消息总线** | WorkflowMessage + InProcessBroker + BusServer/Client | ✅ |
+| **P2 — 内置工具** | 9 个内置工具 + BuiltinToolProvider | ✅ |
+| **P3 — 编排层** | MasterAgent + WorkflowPlan + ToolGuardian + 三级审批 + 进程隔离 | ✅ |
+| **P4 — 工具向量化** | ToolVault + ToolStore（sqlite-vec）+ AgentToolContext + ApprovalManager | ✅ |
+| **P5 — Skill 导入** | Skill 模块 | 🔲 未实现 |
+| **P6 — 全局记忆** | GlobalMemory + ToolExperienceExtractor + PostTaskPipeline + ToolGuardian 闭环 | ✅ |
+| **GUI** | aiohttp Web 应用 + EngineBridge + MCPService + GUIHooks | ✅ |
 
 ---
 
-## 8. 开放问题
+## 7. 待实现需求（路线图参见 implementation_plan.md）
 
-- [x] Agent角色模板的标准格式如何定义？→ YAML声明式 (详见技术方案 §3.1.2)
-- [x] 记忆系统中向量检索的Embedding模型如何选型？→ sentence-transformers本地优先 (详见技术方案 §8)
-- [x] MCP Server是否需要支持多实例部署？→ 初期单实例，M6评估 (详见技术方案 §11)
-- [x] Agent间通信采用同步还是异步消息模式？→ 异步消息传递 (详见技术方案 §11)
-- [ ] 是否需要支持Agent的运行时迁移与持久化(暂停/恢复)？→ 待定，非MVP
-- [x] 如何处理Agent间的资源竞争与死锁问题？→ Coordinator统一管理 (详见技术方案 §11)
+| 优先级 | 需求 |
+|--------|------|
+| **P0（生产前置）** | LLM 重试退避、持久化任务队列、总线认证、执行沙箱、OTel 追踪 |
+| **P1（功能闭环）** | AgentToolContext 轮次自动推进、召回确认闭环、FastAPI 网关 |
+| **P2（工程化）** | Skill 导入（Phase 5）、CI/CD、成本计量 |
+| **P3（扩展）** | 层级架构（Sub-Master）、A2A/AG-UI 协议互操作 |
+
+---
+
+## 8. 术语说明（变更）
+
+原草案中「Skill」概念在当前实现中由 **PromptLayer 动态注入 + 工具组合** 代替，没有独立的 Skill 注册中心或 YAML skill 配置文件；原「AgentFactory」功能由 **MasterAgent.create_sub_agent()** 承担，没有独立的 AgentFactory 类。

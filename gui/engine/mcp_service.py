@@ -3,19 +3,26 @@
 职责：
 1. 创建并持有全局 MCPServer 实例（所有 Agent 共享）
 2. 注册 BuiltinToolProvider（包装全部内置工具）
-3. 为 MasterAgent 和子 Agent 提供 connect_mcp() 接入点
+3. 为 MasterAgent 和子 Agent 提供 connect_mcp() 接入点：
+   - 创建时被赋予的工具权限 → 经 ToolBridge 白名单注入（工具注入）
+   - Agent 工具不足 → 通过 search_new_tools 元工具向 MCP 提需求，
+     由 Vault 执行向量查询并返回候选，选定后自动授权加载
 4. 集成 ToolStore (SQLite) + ToolVault (向量搜索) 实现工具持久化与语义发现
-5. 暴露工具列表查询接口（供前端面板渲染）
+5. 将 Vault 挂载到 MCPServer：任何 Agent 的 Provider 注册
+   （Agent.initialize → register_provider）都会自动同步工具到 Vault，
+   实现所有 Agent 的工具注入与向量化
+6. 暴露工具列表查询接口（供前端面板渲染）
 
 架构：
     EngineBridge
     └── MCPService
-         ├── MCPServer（全局单例）
+         ├── MCPServer（全局单例，挂载 Vault）
          │    └── BuiltinToolProvider（内置工具）
          ├── ToolStore（SQLite 持久化：tools + vec_tools + changelogs）
          ├── ToolVault（内存缓存 + 语义搜索，底层委托 ToolStore）
          ├── EmbeddingClient（Ollama /v1/embeddings 生成工具向量）
-         ├── connect_agent() → 为每个 Agent 创建独立 MCPClient + ToolBridge（附带 Vault）
+         ├── connect_agent() → 为每个 Agent 创建独立 MCPClient + ToolBridge
+         │    （附带 Vault + search_new_tools 元工具）
          └── list_tools() → 供 REST API /api/tools 调用
 
 默认模式（sqlite-vec 方案）：
@@ -94,9 +101,12 @@ class MCPService:
         1. 创建 MCPServer
         2. 创建并注册 BuiltinToolProvider（全部内置工具）
         3. 启动 MCPServer
-        4. [Vault] 创建 ToolStore + EmbeddingClient + ToolVault
+        4. [Vault] 创建 ToolStore + EmbeddingClient + ToolVault，
+           并挂载到 MCPServer（后续任何 Agent 的 Provider 注册自动同步 Vault）
         5. [Vault] 从 Provider 导入工具到 Vault（向量化 + 入库）
-        6. 为 MasterAgent 调用 connect_mcp()（附带 Vault 引用）
+        6. 为 MasterAgent 调用 connect_mcp()（附带 Vault 引用 + 工具发现元工具）
+        7. [Vault] 将 Master 的 Agent 级工具（协调器工具）导入 Vault
+        8. [Vault] 将 Vault 注入 MasterAgent 的 ToolBridge
 
         Args:
             master: MasterAgent 实例（尚未 initialize）
@@ -118,30 +128,48 @@ class MCPService:
         # 4. Vault 初始化（sqlite-vec 方案）
         if self._vault_enabled:
             await self._init_vault(work_dir)
+            # ★ 将 Vault 挂载到 MCPServer：此后任何 Agent 的 Provider 注册
+            #   （Agent.initialize() → register_provider）都会自动把该 Agent
+            #   的工具同步进 Vault（向量化 + 持久化），
+            #   实现"所有 Agent 创建即注入"的工具接入语义。
+            if self._vault is not None:
+                self._server._vault = self._vault
 
-        # 5. 为 MasterAgent 连接 MCP
+        # 6. 为 MasterAgent 连接 MCP
         #    connect_mcp() 内部会创建 MCPClient + ToolBridge，
         #    并将已有 ToolRegistry 工具迁移到 Provider。
-        #    builtin_tools=False 因为我们已通过 BuiltinToolProvider 全量注册。
+        #    builtin_tools=False 因为我们已通过 BuiltinToolProvider 全量注册；
+        #    search_meta_tool=True 使 Master 可通过 search_new_tools
+        #    发现并加载新工具。
         master.connect_mcp(
             server=self._server,
             provider_id=f"master-{master.agent_id[:8]}",
             builtin_tools=False,
+            search_meta_tool=True,
         )
 
-        # 6. 将 Master 的 Agent 级工具（协调器工具）导入 Vault
+        # 7. 将 Master 的 Agent 级工具（协调器工具）导入 Vault
         #    connect_mcp() 将 ToolRegistry 中的协调器工具迁移到了
         #    LocalFunctionProvider（master._mcp_provider），但 Vault 中还没有。
         #    当 ToolBridge.to_openai_tools() 优先使用 Vault 时，
         #    这些工具对 LLM 不可见——必须补充导入。
+        #    （注: Master initialize() 时 register_provider 也会自动同步，
+        #    此处作为初始化前的可见性兜底）
         if self._vault is not None:
             agent_provider = getattr(master, '_mcp_provider', None)
             if agent_provider is not None:
                 await self._import_agent_tools_to_vault(agent_provider)
 
-        # 7. 将 Vault 注入 MasterAgent 的 ToolBridge
+        # 8. 将 Vault 接入 MasterAgent 的 ToolBridge（自动创建 Agent 侧
+        #    AgentToolContext，HOT/WARM/COLD 状态由 Master 独立管理；
+        #    协调器工具标记为必备，永不回收）
         if self._vault is not None and master._tool_bridge is not None:
-            master._tool_bridge._vault = self._vault
+            agent_provider = getattr(master, '_mcp_provider', None)
+            essential = (
+                set(getattr(agent_provider, '_definitions', {}).keys())
+                if agent_provider is not None else None
+            )
+            master._tool_bridge.attach_vault(self._vault, essential_names=essential)
 
         self._initialized = True
         logger.info(
@@ -209,6 +237,46 @@ class MCPService:
         except Exception as exc:
             logger.warning("ToolVault 工具导入失败: %s", exc)
 
+    async def _import_agent_tools_to_vault(self, agent_provider: Any) -> None:
+        """将 Agent 级工具（协调器工具等）导入 Vault。
+
+        解决工具不可见问题：connect_mcp() 将 ToolRegistry 工具迁移到
+        LocalFunctionProvider，但 Vault 中仍缺少这些工具。
+        当 ToolBridge.to_openai_tools() 优先使用 Vault 时，
+        这些工具对 LLM 不可见。
+
+        只导入 Vault 中尚不存在的工具，避免覆盖 BuiltinToolProvider 的同名工具。
+        所有 Agent 级工具标记为 essential=True（HOT 状态，永不回收）。
+        """
+        from youmi.mcp.vault import ToolEntry, ToolContextTier
+
+        definitions = getattr(agent_provider, '_definitions', {})
+        handlers = getattr(agent_provider, '_handlers', {})
+        provider_id = getattr(agent_provider, 'provider_id', '')
+
+        imported = 0
+        for name, defn in definitions.items():
+            if name in self._vault._entries:
+                continue  # 已在 Vault 中（来自 BuiltinToolProvider），不覆盖
+
+            entry = ToolEntry(
+                tool_name=name,
+                definition=defn,
+                handler=handlers.get(name),
+                provider_id=provider_id,
+                essential=True,  # Agent 级工具永不回收
+                summary=defn.description[:80],
+                tier=ToolContextTier.HOT,
+            )
+            self._vault._entries[name] = entry
+            imported += 1
+
+        if imported > 0:
+            logger.info(
+                "ToolVault: 补充导入 %d 个 Agent 级工具 (provider=%s)",
+                imported, provider_id,
+            )
+
     # ------------------------------------------------------------------
     # 子 Agent 接入
     # ------------------------------------------------------------------
@@ -221,8 +289,12 @@ class MCPService:
         """将子 Agent 接入共享 MCPServer。
 
         为 Agent 创建独立的 MCPClient + ToolBridge，
-        权限由 allowed_tools 白名单控制。
+        权限由 allowed_tools 白名单控制（创建时赋予的工具访问权限
+        在此注入）；其自有工具在 Agent.initialize() 注册 Provider 时
+        自动同步到 Vault。
         如果 Vault 已启用，同步注入到 ToolBridge。
+        search_meta_tool=True 使子 Agent 工具不足时可通过
+        search_new_tools 向 MCP 提需求（向量查询 + 授权加载）。
 
         Args:
             agent: Agent 实例（尚未 initialize）
@@ -236,15 +308,17 @@ class MCPService:
             server=self._server,
             provider_id=f"sub-{agent.agent_id[:8]}",
             builtin_tools=False,
+            search_meta_tool=True,
         )
 
         # 如果指定了 allowed_tools，更新 ToolBridge 白名单
         if allowed_tools and agent._tool_bridge is not None:
             agent._tool_bridge._allowed_tools = set(allowed_tools)
 
-        # 注入 Vault 引用（共享同一个 Vault 实例）
+        # 接入 Vault（共享同一个 Vault 实例，自动创建 Agent 侧
+        # AgentToolContext；白名单工具自动标记为必备）
         if self._vault is not None and agent._tool_bridge is not None:
-            agent._tool_bridge._vault = self._vault
+            agent._tool_bridge.attach_vault(self._vault)
 
         logger.info(
             "子 Agent '%s' 已接入 MCP (allowed=%s, vault=%s)",

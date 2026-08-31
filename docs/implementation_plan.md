@@ -1,6 +1,6 @@
 # YouMi Agent 实施计划
 
-> 最后更新：2026-08-26
+> 最后更新：2026-08-31
 >
 > 本文档已合并 `supplement_roadmap.md`（生产就绪缺口分析），形成统一的开发路线图。
 
@@ -8,13 +8,15 @@
 
 ## 总体状态
 
-核心框架（Agent 基类、MCP 协议层、记忆系统、消息总线、内置工具、MasterAgent、ToolGuardian、Hook/插件、Prompt 动态组装、ToolVault 向量搜索、GUI）已具备可用雏形。
+核心框架（Agent 基类、MCP 协议层、记忆系统、消息总线、内置工具、MasterAgent、ToolGuardian、Hook/插件、Prompt 动态组装、ToolVault 向量搜索、GUI、全局记忆）已具备可用雏形。
 
 GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入共享 MCPServer + ToolVault（sqlite-vec 方案），消息总线通过 InProcessBroker 互联。MasterAgent 提示词已清理硬编码角色列表，改为动态查询。
 
-但对照完整生命周期流程图，**编排层高级能力（层级架构）、工具版本管理、全局记忆收集、自动工具更新闭环**等高级能力尚未落地。
+Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 自动沉淀工具使用经验到 GlobalMemory（SQLite + 向量检索），累计失败超阈值自动触发工具版本更新；ToolGuardian 接入全局记忆，修复前自动查询历史经验作为上下文，修复成功后写入 BUG_FIX 经验并标记历史问题 resolved。
 
-**总体完成度：约 75%**
+但对照完整生命周期流程图，**编排层高级能力（层级架构）、Skill 导入**等高级能力尚未落地。
+
+**总体完成度：约 82%**
 
 **生产就绪度：较低** — 当前缺乏重试容错、安全加固、可观测性、部署形态等生产必需能力，需优先补齐。
 
@@ -44,22 +46,21 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 
 ### 已实现
 
-| 模块 | 文件 |
-|------|------|
-| BuiltinToolProvider（9 个内置工具 + search_new_tools 兆底） | `youmi/tools/builtin.py` |
-| 文件操作工具 | `youmi/tools/file_ops.py` |
-| Shell 执行工具 | `youmi/tools/shell_ops.py` |
-| 网页抓取工具 | `youmi/tools/web_ops.py` |
-| 数据工具 | `youmi/tools/data_ops.py` |
-| 协调器操作工具 | `youmi/tools/coordinator_ops.py` |
-| Agent connect_mcp() 自动注册 BuiltinToolProvider | `youmi/core/agent.py` |
+| 模块                                                 | 文件 |
+|----------------------------------------------------|------|
+| BuiltinToolProvider（9 个内置工具 + search_new_tools 兜底） | `youmi/tools/builtin.py` |
+| 文件操作工具                                             | `youmi/tools/file_ops.py` |
+| Shell 执行工具                                         | `youmi/tools/shell_ops.py` |
+| 网页抓取工具                                             | `youmi/tools/web_ops.py` |
+| 数据工具                                               | `youmi/tools/data_ops.py` |
+| 协调器操作工具                                            | `youmi/tools/coordinator_ops.py` |
+| Agent connect_mcp() 自动注册 BuiltinToolProvider       | `youmi/core/agent.py` |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
 | 统一的工具调用超时控制与重试 | 仅 `shell_exec` 有超时，其他工具未统一 |
-| 工具执行前审批门控 | 三级审批模型已实现（auto/manual/master），但无独立 `approval.py` 模块 |
 
 ---
 
@@ -118,6 +119,9 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 | MCPServer JSON-RPC | `youmi/mcp/server.py` | 统一路由 |
 | MCPClient | `youmi/mcp/client.py` | 进程内客户端 |
 | ToolGuardianAgent | `youmi/coordinator/tool_guardian.py` | 修复工具摘要/代码建议 |
+| **AgentToolContext 三级状态管理（Agent 侧）** | `youmi/mcp/context.py` | HOT/WARM/COLD 状态从 Vault 迁移到 Agent 侧；每个 Agent 独立上下文视图；含完整单测 |
+| **AgentToolContext 集成（attach_vault）** | `youmi/mcp/bridge.py`, `gui/engine/mcp_service.py` | `ToolBridge.attach_vault()` 接入共享 Vault 时自动创建 Agent 侧上下文；白名单/协调器工具自动标记必备；GUI 中 Master 与子 Agent 均已切换 |
+| **ApprovalManager 审批独立模块 + 集成** | `youmi/mcp/approval.py`, `youmi/coordinator/tool_approval.py` | 三级审批决策与审计日志委托 ApprovalManager；`ToolApprovalMixin` 全部审批路径接入，新增 `get_approval_audit_log()` |
 | **MCPService（GUI 集成层）** | `gui/engine/mcp_service.py` | GUI 级 MCP 服务层：MCPServer + BuiltinToolProvider + ToolStore + ToolVault + EmbeddingClient 一体化 |
 | **sqlite-vec 默认启用** | `gui/engine/mcp_service.py` | MCPService.setup() 默认创建 ToolStore + ToolVault + EmbeddingClient，工具描述向量化后存入 SQLite |
 | **优雅降级策略** | `gui/engine/mcp_service.py` | Embedding 失败 → 关键词搜索；Store 失败 → 纯内存；任何异常不阻塞 MCP 主流程 |
@@ -127,12 +131,10 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 
 | 缺失项 | 说明 |
 |--------|------|
-| AgentToolContext 三级状态管理 | 当前由 `ToolVault` 管理 HOT/WARM/COLD，需迁移到 `ToolBridge` / `AgentToolContext`；数据库只存 tool 定义，不存上下文状态 |
-| MCP_Agent 功能封装 | 可作为 MCP Server / ToolBridge / Vault 中的功能，负责帮 SubAgent 添加合适工具上下文 |
-| 召回确认闭环 | 原发起 Agent 确认：合适则加载到上下文；不合适则扩大搜索并排除已否决项；多次不合适回复“没有该功能的工具” |
+| MCP_Agent 功能封装 | `ToolBridge.inject_tool_context()` 接口已具备，但尚无独立的 MCP_Agent 角色自动为 SubAgent 补充工具上下文 |
+| 召回确认闭环 | 原发起 Agent 确认：合适则加载到上下文；不合适则扩大搜索并排除已否决项；多次不合适回复“没有该功能的工具”（`search_and_confirm` 基础接口已有，自动闭环未接入对话流） |
 | 多语言代码执行接口 | `tools.language` / `tools.runtime` 字段；当前仅实现 Python 执行器，其他语言留扩展接口 |
-| 全局记忆驱动的自动工具修复（并触发版本更新） | 任务结束后基于全局记忆统一修复工具，并创建新版本 |
-| 工具申请审批流独立模块 | 三级审批模型已在 `master.py` 实现（auto/manual/master），但无独立 `youmi/mcp/approval.py` 模块 |
+| AgentToolContext 轮次推进接入对话循环 | `advance_turn()` / `recycle()` 尚未在 Agent 每轮对话后自动调用，自动回收暂未生效 |
 
 ---
 
@@ -154,24 +156,32 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 
 ## Phase 6：全局记忆 / 工具使用经验沉淀
 
+> 经验专供工具管理 Agent（如 ToolGuardian）诊断和修复工具问题使用，修复完成后标记 resolved，不注入子 Agent prompt（避免记忆容量膨胀）。
+
 ### 已实现
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
 | Session 持久化后端（SQLite + File） | `youmi/memory/backends/` | 会话级数据持久化 |
 | MemoryManager 持久化集成 | `youmi/memory/memory.py` | 记忆管理器集成后端 |
+| 全局记忆数据模型 | `youmi/knowledge/models.py` | `KnowledgeEntry`（含 resolved/resolution 修复闭环字段）/ `KnowledgeCategory` / `ToolKnowledge` 聚合视图 |
+| `GlobalMemory` 全局记忆核心 | `youmi/knowledge/global_memory.py` | SQLite 持久化 + 向量语义检索（接入 EmbeddingClient，未接入时降级关键词匹配）；`add_experience` / `batch_add` / `search` / `get_tool_knowledge` / `mark_resolved` / `stats` |
+| `ToolExperienceExtractor` 经验提取器 | `youmi/knowledge/experience_extractor.py` | 从对话记录提取工具使用经验；失败分析支持 LLM 增强与规则降级（关键词匹配 + 模板生成） |
+| 任务结束后自动提取工具经验 | `youmi/coordinator/post_task.py` | PostTaskPipeline 新增第4阶段 `update_global_memory()`：经验沉淀 + 高失败率工具语义分析 + 累计失败阈值触发版本更新 |
+| 工具修复后自动创建新版本 | `youmi/coordinator/post_task.py` | 累计失败 ≥3 次且成功率 <50% 时调用 `trigger_tool_version_update()`，并记录 BUG_FIX 经验 |
+| MasterAgent 集成全局记忆 | `youmi/coordinator/master.py` | `__init__` 接受 `global_memory` 参数；`on_stop()` 传递给 PostTaskPipeline（含 ToolStore 自动发现） |
+| 记忆向量检索 | `youmi/memory/memory.py`, `youmi/memory/strategies/` | `MemoryManager.search()` 支持向量语义检索（传入 EmbeddingClient），降级为策略关键词检索；full/summary/lstm 策略均实现 `search()` |
+| 顶层 API 导出 | `youmi/__init__.py` | `GlobalMemory` / `KnowledgeCategory` / `KnowledgeEntry` / `ToolKnowledge` / `ToolExperienceExtractor` |
+| **ToolGuardian 全局记忆闭环** | `youmi/coordinator/tool_guardian.py` | 接入 `global_memory` 参数：修复前 `get_tool_knowledge()` 查询历史经验注入修复上下文；修复成功后 `_persist_fix_to_memory()` 写入 BUG_FIX 经验（自动标记 resolved）并将历史未解决问题 `mark_resolved()`；全局记忆不可用/失败时优雅降级 |
+| **修复策略注入历史经验** | `youmi/coordinator/fix_strategies.py` | `_generate_fix()` 接受 `tool_knowledge` 参数：LLM prompt 注入「历史经验」段（known_issues/fix_history/resolved_issues + 根治提示）；规则路径附加已知问题（与本次报错去重） |
+| **search_tool_experience 内置工具** | `youmi/coordinator/tool_guardian.py` | ToolGuardian 可主动检索全局记忆中的工具经验（语义检索，未接入/异常时返回明确状态） |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
-| 工具使用经验的全局记忆收集 | 运行中发现的正确调用姿势、原作者未说明的边界条件、实际触发的 bug，未跨 Agent 聚合 |
-| `youmi/knowledge/` 全局记忆模块 | 无 `GlobalMemory` / `ToolExperienceExtractor` |
-| 任务结束后自动提取工具修复经验 | MasterAgent / WorkflowExecutor 未在对话结束后提取工具相关记忆 |
-| 基于全局记忆统一修复工具 | 任务结束后，把经验汇总并生成统一的工具修复方案 |
-| 工具修复后自动创建新版本 | 修复后的工具以新版本形式存在，触发 Phase 4 的版本更新流程 |
-| 创建子 Agent 时注入工具使用经验 | 未在 `system_prompt` 中注入历史边界条件 / 正确调用方式 |
-| 记忆向量检索 | 当前为 full/summary/lstm 策略，无语义搜索 |
+| 人工反馈回写全局经验 | 用户反馈采集后写入 GlobalMemory（与非功能需求「反馈闭环」联动） |
+| ToolGuardian GUI 集成 | GUI 中自动创建 ToolGuardianAgent 并传入全局记忆实例（当前需在代码中手动构造） |
 
 ---
 
@@ -217,7 +227,7 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 | 缺失项 | 说明 |
 |--------|------|
 | 总线事件转发到前端 | 监听 Broker 消息回调，将 Agent 间通信转发为 GUI `agent_message` 事件 |
-| ToolGuardian GUI 集成 | 创建 ToolGuardianAgent 实例接入总线，自动接收子 Agent 工具调用失败汇报 |
+| ToolGuardian GUI 集成 | 创建 ToolGuardianAgent 实例接入总线（传入 MCPService 的全局记忆实例），自动接收子 Agent 工具调用失败汇报 |
 | 工具搜索 UI | 前端工具面板增加「搜索工具」功能（自然语言 → 向量匹配 → 候选工具） |
 | Mock 模式 Vault 数据 | mock_engine.py 返回更丰富的 mock 工具数据（参数 + 描述） |
 
@@ -295,13 +305,11 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 
 ### 7. 工程化与可演进性 — **中低优先级**
 
-> `docs/details/*` 为空壳，无版本管理，无 CI，无法复现运行配置。
-
 | 缺口 | 现状 | 目标 |
 |------|------|------|
 | 版本注册表 | 无 | agent / tool / prompt 版本化，支持回滚与灰度 |
 | 实验追踪 | 无 | 记录不同 prompt / 模型的效果对比（MLflow / 轻量 JSONL） |
-| 文档 | 空壳 | 补全 API Reference、快速上手 Demo、架构图 |
+| 文档 | ✅ 已补全（docs/details/ 7 个模块详细介绍 + 全部顶层文档对齐） | API Reference、快速上手 Demo |
 | CI | 无 | lint + 单测 + 打包校验 `pip install` |
 
 ### 8. 协议互操作 — **低优先级**
@@ -330,10 +338,10 @@ P0 — 稳定性与安全（生产部署前置条件）
   └── 可观测性：OTel 埋点 + 审计日志 + 监控 + 健康检查       ❌ 未实现
 
 P1 — 功能闭环与生产可用
-  ├── Phase 4  AgentToolContext 三级状态管理                  ❌ 未实现
+  ├── Phase 4  AgentToolContext 三级状态管理 + 集成           ✅ 已完成（轮次自动推进待接入）
   ├── Phase 4  召回确认闭环                                  ❌ 未实现
-  ├── Phase 6  全局记忆 / 工具经验沉淀                       ❌ 未实现
-  ├── Phase 6  记忆向量检索                                  ❌ 未实现
+  ├── Phase 6  全局记忆 / 工具经验沉淀                       ✅ 已完成（含 ToolGuardian 经验消费闭环）
+  ├── Phase 6  记忆向量检索                                  ✅ 已完成（MemoryManager.search）
   ├── 部署：FastAPI 网关 + 多 Worker                         ❌ 未实现
   ├── 部署：多租户隔离                                       ❌ 未实现
   └── 质量保障：mock LLM + eval 基准                         ❌ 未实现
@@ -341,7 +349,7 @@ P1 — 功能闭环与生产可用
 P2 — 降本增效与工程化
   ├── 成本治理：费用计量 + 预算上限                           ❌ 未实现
   ├── 成本治理：模型路由 + 语义缓存                          ❌ 未实现
-  ├── 工程化：CI/CD + 文档补全                               ❌ 未实现
+  ├── 工程化：CI/CD + 文档补全（docs/ 已补全）                ✅ 文档 / ❌ CI
   ├── 工程化：版本注册表 + 实验追踪                          ❌ 未实现
   ├── Phase 5  Skill 导入                                    ❌ 未实现
   └── 外部通信渠道（Telegram/Discord）                       ❌ 未实现
@@ -373,6 +381,12 @@ P3 — 长期扩展与生态
 ✅ Phase 4  ToolStore sqlite-vec 持久化存储层
 ✅ Phase 4  ToolVault ↔ ToolStore 集成 + 向量增量更新
 ✅ Phase 4  工具版本号 + 版本链 + 变更日志
+✅ Phase 4  AgentToolContext Agent 侧三级状态 + attach_vault 集成
+✅ Phase 4  ApprovalManager 独立审批模块 + MasterAgent 接入（含审计日志）
+✅ Phase 6  全局记忆模块（GlobalMemory + KnowledgeEntry + ToolExperienceExtractor）
+✅ Phase 6  PostTaskPipeline 经验沉淀 + 自动版本更新触发
+✅ Phase 6  记忆向量检索（MemoryManager.search + 策略 search）
+✅ Phase 6  ToolGuardian 经验消费闭环（修复前查询经验 + 修复后 BUG_FIX 写回 + mark_resolved）
 ✅ GUI-Core MCP 集成（MCPService + sqlite-vec 默认启用）
 ✅ GUI-Core Bus 集成（InProcessBroker + 子 Agent 自动接入）
 ✅ GUI 工具面板（前端 + /api/tools + tool_list 事件）
@@ -385,6 +399,6 @@ P3 — 长期扩展与生态
 
 - **M1 — 基础稳固**：P0 可靠性（重试退避 + 熔断）+ P0 安全（认证 + 沙箱）+ P0 可观测性（OTel + 审计日志）→ 达到「可控、可查、可观测」的最小生产门槛。
 - **M2 — 可运维**：P0 可靠性（持久队列 + 断点续跑 + Saga）+ P1 部署（FastAPI 网关 + Worker + 多租户）→ 支持真实并发与故障恢复。
-- **M3 — 功能完整**：P1 工具生命周期闭环（AgentToolContext + 召回闭环）+ P1 全局记忆（经验沉淀 + 向量检索）→ 工具与知识可积累。
+- **M3 — 功能完整**：P1 工具生命周期闭环（AgentToolContext + 召回闭环）+ P1 全局记忆（经验沉淀 + 向量检索 + ToolGuardian 闭环）→ 工具与知识可积累。
 - **M4 — 降本增效**：P2 成本治理 + 质量保障 + 工程化 → 成本可控、行为可回归、配置可复现。
 - **M5 — 生态扩展**：P3 互操作 + 层级架构 + 外部通信 → 融入外部 agent 生态，支持复杂编排。

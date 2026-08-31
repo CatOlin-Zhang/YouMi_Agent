@@ -383,8 +383,15 @@ html, body {
   width: 8px; height: 8px; border-radius: 50%; margin-left: auto;
   background: #adb5bd;
 }
-.status-dot.running { background: #fab005; }
+.status-dot.running {
+  background: #fab005;
+  animation: status-blink 1.2s ease-in-out infinite;
+}
 .status-dot.idle { background: #51cf66; }
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 
 #btn-add-member {
   margin: 10px 14px; padding: 9px; border: 1px dashed var(--border);

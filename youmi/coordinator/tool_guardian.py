@@ -6,6 +6,9 @@ ToolGuardianAgent — 工具全局记忆守护 Agent
 2. 分析问题根因（skill 描述不清、参数边界、缺失功能等）
 3. 直接修改 MCP 服务中对应工具的描述/说明
 4. 必要时生成具体的工具代码修改意见（含边界情况处理建议）
+5. P6 全局记忆闭环：接入 GlobalMemory 后，
+   - 修复前查询该工具的历史经验作为修复上下文（known_issues/fix_history）
+   - 修复成功后写入 BUG_FIX 经验，并将历史未解决问题标记 resolved
 
 工作流程：
 1. 其他 Agent 连接 ToolGuardianAgent（connect_guardian）
@@ -19,6 +22,7 @@ ToolGuardianAgent — 工具全局记忆守护 Agent
    - ERROR_HANDLING → 补充错误处理说明
 5. 通过 MCPServer.update_tool_description() 直接修改工具表述
 6. 将修改意见记录到历史中供后续参考
+7. 接入全局记忆时，修复结果写回全局记忆形成跨任务闭环
 
 用法::
 
@@ -28,8 +32,10 @@ ToolGuardianAgent — 工具全局记忆守护 Agent
     guardian = ToolGuardianAgent.from_config_dir(mcp_server=server)
     await guardian.initialize()
 
-    # 方式 2：直接构造（使用默认配置）
-    guardian = ToolGuardianAgent(mcp_server=server)
+    # 方式 2：直接构造（使用默认配置，可接入全局记忆形成 P6 闭环）
+    from youmi.knowledge.global_memory import GlobalMemory
+    memory = GlobalMemory()
+    guardian = ToolGuardianAgent(mcp_server=server, global_memory=memory)
     await guardian.initialize()
 
     # 其他 Agent 连接 guardian
@@ -42,6 +48,7 @@ ToolGuardianAgent — 工具全局记忆守护 Agent
 - ToolGuardianAgent 不参与具体任务执行，只负责工具记忆维护
 - 修改工具描述时会保留原始描述作为历史参考
 - 所有修改记录可追溯（_modification_history）
+- 全局记忆为可选依赖，未接入或读写失败时修复流程优雅降级
 """
 
 from __future__ import annotations
@@ -60,6 +67,7 @@ from youmi.core.types import (
     MemoryConfig,
     MessageRole,
 )
+from youmi.coordinator.fix_strategies import FixStrategiesMixin
 from youmi.llm.client import LLMClient
 from youmi.mcp.protocol import ToolIssueReport, ToolIssueType
 from youmi.mcp.server import MCPServer
@@ -108,7 +116,7 @@ class ToolModification:
 # ToolGuardianAgent
 # ---------------------------------------------------------------------------
 
-class ToolGuardianAgent(Agent):
+class ToolGuardianAgent(FixStrategiesMixin, Agent):
     """工具全局记忆守护 Agent
 
     监听来自任意 Agent 的工具问题汇报，分析后修正 MCP 工具描述，
@@ -149,6 +157,7 @@ class ToolGuardianAgent(Agent):
         config: AgentConfig | None = None,
         memory_strategy: str | None = None,
         llm_call: Any | None = None,
+        global_memory: Any | None = None,
     ) -> None:
         """
         Args:
@@ -156,6 +165,9 @@ class ToolGuardianAgent(Agent):
             config: Agent 配置（可选，有合理默认值）
             memory_strategy: 记忆策略覆盖
             llm_call: LLM 调用函数覆盖
+            global_memory: GlobalMemory 实例（可选），接入后形成 P6 闭环：
+                修复前查询该工具的历史经验作为上下文，
+                修复成功后写入 BUG_FIX 经验并标记旧问题已解决
         """
         if config is None:
             config = AgentConfig(
@@ -174,6 +186,7 @@ class ToolGuardianAgent(Agent):
         super().__init__(config, memory_strategy=memory_strategy, llm_call=llm_call)
 
         self._mcp_server = mcp_server
+        self._global_memory = global_memory
 
         # 收集到的汇报历史: tool_name → [ToolIssueReport]
         self._reports: dict[str, list[ToolIssueReport]] = defaultdict(list)
@@ -304,10 +317,12 @@ class ToolGuardianAgent(Agent):
 
         流程:
         1. 读取当前工具定义
-        2. 分析问题类型集合
-        3. 使用 LLM（如果有）或规则引擎生成新描述
-        4. 应用修改到 MCPServer
-        5. 记录修改历史
+        2. 从全局记忆查询该工具的历史经验（P6 闭环，可选）
+        3. 分析问题类型集合
+        4. 使用 LLM（如果有）或规则引擎生成新描述（注入历史经验）
+        5. 应用修改到 MCPServer
+        6. 记录修改历史
+        7. 修复成功后写回全局记忆：BUG_FIX 经验 + 标记旧问题已解决（P6 闭环）
 
         Args:
             tool_name: 工具名
@@ -334,20 +349,26 @@ class ToolGuardianAgent(Agent):
         old_description = current_defn.description
         old_params = {p.name: p.description for p in current_defn.parameters}
 
-        # 2. 分析问题类型
+        # 2. P6 闭环：从全局记忆查询该工具的历史经验作为修复上下文
+        tool_knowledge = await self._load_tool_knowledge(tool_name)
+        if tool_knowledge is not None and not tool_knowledge.is_empty:
+            result["knowledge_entries"] = len(tool_knowledge.entry_ids)
+
+        # 3. 分析问题类型
         issue_types = [r.issue_type for r in reports]
         primary_type = max(set(issue_types), key=issue_types.count)
 
-        # 3. 生成新描述和代码建议
+        # 4. 生成新描述和代码建议（注入历史经验）
         new_description, param_updates, code_suggestion = await self._generate_fix(
             tool_name=tool_name,
             current_description=old_description,
             current_params=old_params,
             reports=reports,
             primary_type=primary_type,
+            tool_knowledge=tool_knowledge,
         )
 
-        # 4. 应用修改到 MCPServer
+        # 5. 应用修改到 MCPServer
         if new_description and new_description != old_description:
             success = self._mcp_server.update_tool_description(
                 tool_name=tool_name,
@@ -362,11 +383,11 @@ class ToolGuardianAgent(Agent):
             if success:
                 logger.info("ToolGuardian updated tool '%s' description", tool_name)
 
-        # 5. 记录代码建议
+        # 6. 记录代码建议
         if code_suggestion:
             result["code_suggestion"] = code_suggestion
 
-        # 6. 记录修改历史
+        # 7. 记录修改历史
         modification = ToolModification(
             tool_name=tool_name,
             report=reports[0],  # 以第一条汇报为代表
@@ -377,170 +398,115 @@ class ToolGuardianAgent(Agent):
         )
         self._modification_history[tool_name].append(modification)
 
+        # 8. P6 闭环：修复成功后写回全局记忆
+        if result["description_updated"] or code_suggestion:
+            memory_result = await self._persist_fix_to_memory(tool_name, modification)
+            if memory_result is not None:
+                result["memory_updated"] = memory_result
+
         return result
 
-    async def _generate_fix(
+    # -----------------------------------------------------------------------
+    # P6 全局记忆闭环
+    # -----------------------------------------------------------------------
+
+    async def _load_tool_knowledge(self, tool_name: str) -> Any | None:
+        """从全局记忆查询该工具的历史经验（ToolKnowledge）
+
+        全局记忆不可用或查询失败时返回 None，修复流程优雅降级。
+        """
+        if self._global_memory is None:
+            return None
+        try:
+            knowledge = await self._global_memory.get_tool_knowledge(tool_name)
+            if not knowledge.is_empty:
+                logger.info(
+                    "ToolGuardian loaded %d knowledge entries for tool '%s' "
+                    "(known_issues=%d resolved=%d)",
+                    len(knowledge.entry_ids), tool_name,
+                    len(knowledge.known_issues), len(knowledge.resolved_issues),
+                )
+            return knowledge
+        except Exception:
+            logger.warning(
+                "ToolGuardian failed to load tool knowledge for '%s', "
+                "continuing without global memory context",
+                tool_name, exc_info=True,
+            )
+            return None
+
+    async def _persist_fix_to_memory(
         self,
         tool_name: str,
-        current_description: str,
-        current_params: dict[str, str],
-        reports: list[ToolIssueReport],
-        primary_type: ToolIssueType,
-    ) -> tuple[str, dict[str, str], str]:
-        """生成工具描述修复和代码建议
+        modification: ToolModification,
+    ) -> dict[str, Any] | None:
+        """修复闭环：将修复结果写回全局记忆
 
-        优先使用 LLM 分析，无 LLM 时退化为规则引擎。
+        1. 写入一条 BUG_FIX 经验，记录本次修复方案
+        2. 将该工具未解决的历史经验条目标记为 resolved
 
         Returns:
-            (new_description, param_updates, code_suggestion)
+            写回统计 {"fix_entry_id", "resolved_count"}；全局记忆不可用时返回 None
         """
-        # 尝试使用 LLM
-        if self._llm_client is not None:
-            return await self._generate_fix_with_llm(
-                tool_name, current_description, current_params, reports, primary_type,
-            )
+        if self._global_memory is None:
+            return None
 
-        # 退化为规则引擎
-        return self._generate_fix_with_rules(
-            tool_name, current_description, current_params, reports, primary_type,
-        )
+        from youmi.knowledge.models import KnowledgeCategory
 
-    async def _generate_fix_with_llm(
-        self,
-        tool_name: str,
-        current_description: str,
-        current_params: dict[str, str],
-        reports: list[ToolIssueReport],
-        primary_type: ToolIssueType,
-    ) -> tuple[str, dict[str, str], str]:
-        """使用 LLM 生成修复方案"""
-        # 构建汇报摘要
-        report_summaries = []
-        for r in reports:
-            report_summaries.append(
-                f"- [{r.issue_type.value}] 来自 Agent {r.reporter_agent_id}: "
-                f"{r.error_message} (参数: {json.dumps(r.call_arguments, ensure_ascii=False)})"
-            )
-            if r.suggestion:
-                report_summaries.append(f"  建议: {r.suggestion}")
+        # 1. 构造修复描述并写入 BUG_FIX 经验
+        fix_summary = f"ToolGuardian 修复 '{tool_name}' 描述"
+        if modification.new_description != modification.old_description:
+            fix_summary += f": {modification.new_description[:200]}"
+        if modification.code_suggestion:
+            fix_summary += f"\n代码建议: {modification.code_suggestion[:300]}"
 
-        prompt = f"""分析以下工具调用问题并生成修复方案。
-
-## 工具信息
-- 名称: {tool_name}
-- 当前描述: {current_description}
-- 当前参数描述: {json.dumps(current_params, ensure_ascii=False)}
-
-## 问题汇报
-{chr(10).join(report_summaries)}
-
-## 主要问题类型: {primary_type.value}
-
-## 要求
-请输出 JSON 格式，包含以下字段：
-1. "new_description": 改进后的工具描述（包含使用限制、边界情况等）
-2. "param_updates": 参数描述更新，格式 {{"参数名": "新描述"}}（只更新需要改的参数）
-3. "code_suggestion": 代码修改建议（如果不需要代码修改则为空字符串）
-
-只输出 JSON，不要其他内容。"""
-
+        memory_result: dict[str, Any] = {}
         try:
-            response = await self._llm_client.chat(
-                messages=[
-                    {"role": "system", "content": self._config.system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
+            entry = await self._global_memory.add_experience(
+                tool_name=tool_name,
+                content=fix_summary,
+                category=KnowledgeCategory.BUG_FIX,
+                source_agent_id=self.agent_id,
+                metadata={
+                    "issue_type": modification.report.issue_type.value,
+                    "reporter_agent_id": modification.report.reporter_agent_id,
+                    "modification": modification.to_dict(),
+                },
             )
+            memory_result["fix_entry_id"] = entry.entry_id
 
-            # 尝试解析 JSON
-            content = response.content.strip()
-            # 去掉可能的 markdown 代码块
-            if content.startswith("```"):
-                content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
+            # BUG_FIX 条目写入后立即标记 resolved（修复记录本身即已完成）
+            await self._global_memory.mark_resolved(entry.entry_id, fix_summary)
 
-            data = json.loads(content)
-            return (
-                data.get("new_description", current_description),
-                data.get("param_updates", {}),
-                data.get("code_suggestion", ""),
+            # 2. 标记该工具未解决的历史经验为已解决
+            unresolved = await self._global_memory.list_entries(
+                tool_name=tool_name,
+                unresolved_only=True,
             )
-        except (json.JSONDecodeError, Exception) as exc:
-            logger.warning("ToolGuardian LLM fix generation failed: %s, falling back to rules", exc)
-            return self._generate_fix_with_rules(
-                tool_name, current_description, current_params, reports, primary_type,
+            resolved_count = 0
+            for old_entry in unresolved:
+                updated = await self._global_memory.mark_resolved(
+                    old_entry.entry_id,
+                    fix_description=fix_summary,
+                )
+                if updated is not None:
+                    resolved_count += 1
+            memory_result["resolved_count"] = resolved_count
+
+            logger.info(
+                "ToolGuardian persisted fix for '%s' to global memory: "
+                "fix_entry=%s resolved=%d",
+                tool_name, entry.entry_id, resolved_count,
             )
-
-    @staticmethod
-    def _generate_fix_with_rules(
-        tool_name: str,
-        current_description: str,
-        current_params: dict[str, str],
-        reports: list[ToolIssueReport],
-        primary_type: ToolIssueType,
-    ) -> tuple[str, dict[str, str], str]:
-        """基于规则的修复方案（LLM 不可用时的退路）"""
-        # 收集所有错误信息
-        all_errors = [r.error_message for r in reports]
-        all_suggestions = [r.suggestion for r in reports if r.suggestion]
-        all_args = [r.call_arguments for r in reports]
-
-        # 根据问题类型生成修复
-        suffix_parts: list[str] = []
-        param_updates: dict[str, str] = {}
-        code_suggestion = ""
-
-        if primary_type == ToolIssueType.UNCLEAR_DESCRIPTION:
-            # 在描述末尾追加常见问题说明
-            suffix_parts.append(
-                f"\n\n[Guardian 修正] 已知问题：该工具描述可能导致误解。"
-                f"常见错误: {'; '.join(set(all_errors[:3]))}"
+            return memory_result
+        except Exception:
+            logger.warning(
+                "ToolGuardian failed to persist fix for '%s' to global memory",
+                tool_name, exc_info=True,
             )
-            if all_suggestions:
-                suffix_parts.append(f"使用建议: {'; '.join(all_suggestions[:2])}")
+            return None
 
-        elif primary_type == ToolIssueType.PARAMETER_BOUNDARY:
-            # 从错误中提取参数边界信息
-            suffix_parts.append("\n\n[Guardian 修正] 参数边界注意事项：")
-            for i, (err, args) in enumerate(zip(all_errors[:3], all_args[:3])):
-                suffix_parts.append(f"  - 当参数为 {json.dumps(args, ensure_ascii=False)} 时可能出现: {err}")
 
-        elif primary_type == ToolIssueType.MISSING_FEATURE:
-            suffix_parts.append(
-                f"\n\n[Guardian 修正] 当前不支持的场景: {'; '.join(set(all_errors[:3]))}"
-            )
-            code_suggestion = (
-                f"工具 '{tool_name}' 需要扩展功能以处理以下场景:\n"
-                + "\n".join(f"  - {err}" for err in set(all_errors[:5]))
-            )
-
-        elif primary_type == ToolIssueType.UNEXPECTED_BEHAVIOR:
-            suffix_parts.append(
-                f"\n\n[Guardian 修正] 已知异常行为: {'; '.join(set(all_errors[:3]))}"
-            )
-            code_suggestion = (
-                f"工具 '{tool_name}' 存在意外行为，建议排查:\n"
-                + "\n".join(f"  - {err}" for err in set(all_errors[:5]))
-            )
-
-        elif primary_type == ToolIssueType.ERROR_HANDLING:
-            suffix_parts.append(
-                f"\n\n[Guardian 修正] 错误处理注意事项: {'; '.join(set(all_errors[:3]))}"
-            )
-            code_suggestion = (
-                f"工具 '{tool_name}' 需要增强错误处理:\n"
-                + "\n".join(f"  - 处理: {err}" for err in set(all_errors[:5]))
-            )
-
-        new_description = current_description
-        if suffix_parts:
-            new_description = current_description + "\n".join(suffix_parts)
-
-        return new_description, param_updates, code_suggestion
 
     # -----------------------------------------------------------------------
     # 内置工具注册
@@ -723,6 +689,76 @@ class ToolGuardianAgent(Agent):
 
         self._tool_registry.register(history_tool, _history_handler)
 
+        # 工具: search_tool_experience (P6 全局记忆检索)
+        search_exp_tool = ToolDefinition(
+            name="search_tool_experience",
+            description=(
+                "从全局记忆中检索工具的历史经验（已知问题、历史修复、最佳实践）。"
+                "在分析工具问题前调用，可参考过去的失败教训避免重复修复。"
+            ),
+            parameters=[
+                ToolParameter(
+                    name="query",
+                    type="string",
+                    description="检索关键词或问题描述",
+                    required=True,
+                ),
+                ToolParameter(
+                    name="tool_name",
+                    type="string",
+                    description="限定工具名（空字符串表示全部工具）",
+                    required=False,
+                    default="",
+                ),
+                ToolParameter(
+                    name="top_k",
+                    type="integer",
+                    description="最多返回条数（默认 5）",
+                    required=False,
+                    default=5,
+                ),
+            ],
+        )
+
+        async def _search_exp_handler(**kwargs: Any) -> str:
+            if self._global_memory is None:
+                return json.dumps({
+                    "status": "unavailable",
+                    "error": "全局记忆未接入 (global_memory is None)",
+                }, ensure_ascii=False)
+
+            query = kwargs.get("query", "")
+            tool_name = kwargs.get("tool_name", "") or None
+            top_k = int(kwargs.get("top_k", 5) or 5)
+
+            try:
+                entries = await self._global_memory.search(
+                    query=query, tool_name=tool_name, top_k=top_k,
+                )
+                return json.dumps({
+                    "status": "ok",
+                    "query": query,
+                    "result_count": len(entries),
+                    "entries": [
+                        {
+                            "entry_id": e.entry_id,
+                            "tool_name": e.tool_name,
+                            "category": e.category.value,
+                            "content": e.content,
+                            "resolved": e.resolved,
+                            "resolution": e.resolution,
+                        }
+                        for e in entries
+                    ],
+                }, ensure_ascii=False, default=str)
+            except Exception as exc:
+                return json.dumps({
+                    "status": "error",
+                    "error": str(exc),
+                }, ensure_ascii=False)
+
+        self._tool_registry.register(search_exp_tool, _search_exp_handler)
+
     # -----------------------------------------------------------------------
     # 生命周期钩子
     # -----------------------------------------------------------------------
@@ -771,4 +807,5 @@ class ToolGuardianAgent(Agent):
         summary["pending_count"] = self.pending_count
         summary["tools_with_reports"] = list(self._reports.keys())
         summary["tools_modified"] = list(self._modification_history.keys())
+        summary["global_memory_enabled"] = self._global_memory is not None
         return summary

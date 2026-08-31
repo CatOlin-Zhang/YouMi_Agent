@@ -47,6 +47,13 @@ from youmi.core.hooks import (
 from youmi.core.plugin import Plugin, PluginManager
 from youmi.core.prompt import PromptAssembler, PromptLayer
 from youmi.llm.embeddings import EmbeddingClient, EmbeddingError
+from youmi.knowledge import (
+    GlobalMemory,
+    KnowledgeCategory,
+    KnowledgeEntry,
+    ToolKnowledge,
+    ToolExperienceExtractor,
+)
 
 __all__ = [
     "Agent",
@@ -118,6 +125,12 @@ __all__ = [
     "ApprovalRecord",
     "ToolVersion",
     "bump_version",
+    # Phase 6: 全局记忆
+    "GlobalMemory",
+    "KnowledgeCategory",
+    "KnowledgeEntry",
+    "ToolKnowledge",
+    "ToolExperienceExtractor",
 ]
 
 __version__ = "0.1.0"

@@ -177,6 +177,61 @@ class MemoryManager:
         await self._strategy.clear()
 
     # ------------------------------------------------------------------
+    # 记忆检索 (P6)
+    # ------------------------------------------------------------------
+
+    async def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        embedding_client: Any | None = None,
+    ) -> list[dict[str, str]]:
+        """检索记忆
+
+        接入 EmbeddingClient 时对当前上下文消息做向量语义检索；
+        未接入时降级为策略的关键词检索 (MemoryStrategy.search)。
+
+        用法::
+
+            # 关键词检索
+            hits = await manager.search("文件路径")
+
+            # 向量检索
+            hits = await manager.search("文件路径", embedding_client=embedder)
+
+        Args:
+            query: 查询文本
+            top_k: 最多返回条数
+            embedding_client: EmbeddingClient 实例 (None = 关键词检索)
+
+        Returns:
+            匹配的消息列表 [{"role": ..., "content": ...}]
+        """
+        if not query.strip():
+            return []
+
+        # 向量语义检索
+        if embedding_client is not None:
+            try:
+                context = await self.get_context()
+                if not context:
+                    return []
+                vectors = await embedding_client.embed(
+                    [m.get("content", "") for m in context],
+                )
+                query_vec = await embedding_client.embed_one(query)
+                scores = await embedding_client.similarity(query_vec, vectors)
+                scored = sorted(
+                    zip(context, scores), key=lambda x: x[1], reverse=True,
+                )
+                return [m for m, s in scored[:top_k] if s > 0.1]
+            except Exception:
+                pass  # 向量检索失败 → 关键词降级
+
+        # 关键词降级检索 (委托给策略)
+        return await self._strategy.search(query, top_k=top_k)
+
+    # ------------------------------------------------------------------
     # Session 持久化
     # ------------------------------------------------------------------
 

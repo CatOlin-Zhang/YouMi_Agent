@@ -5,6 +5,7 @@
 1. collect_tool_experiences() — 提取工具调用的成功/失败模式
 2. summarize_task_outcomes() — 汇总任务结果，生成结构化摘要
 3. update_tool_notes() — 将工具使用经验追加到 ToolGuardianAgent
+4. update_global_memory() — (P6) 将经验沉淀到全局记忆，触发工具版本更新
 
 用法::
 
@@ -13,7 +14,7 @@
     pipeline = PostTaskPipeline()
     await pipeline.run(master_agent, task_results)
 
-子类可通过覆写三个阶段的钩子方法定制行为::
+子类可通过覆写各阶段的钩子方法定制行为::
 
     class MyPipeline(PostTaskPipeline):
         async def collect_tool_experiences(self, ...):
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
     from youmi.coordinator.master import MasterAgent
     from youmi.core.agent import TaskResult
     from youmi.mcp.tool_store import ToolStore
+    from youmi.knowledge.global_memory import GlobalMemory
 
 logger = logging.getLogger(__name__)
 
@@ -92,19 +94,27 @@ class TaskOutcomeSummary(BaseModel):
 class PostTaskPipeline:
     """任务完成后后台流水线
 
-    在任务结束后自动执行三个阶段的收集流程:
+    在任务结束后自动执行四个阶段的收集流程:
     1. 工具经验收集 — 从 SubAgent 对话记录中提取工具调用模式
     2. 任务结果汇总 — 生成结构化摘要写入 MasterAgent 记忆
     3. 工具笔记更新 — 将经验追加到 ToolGuardianAgent（如已连接）
+    4. 全局记忆沉淀 — (P6) 将经验写入 GlobalMemory，
+       高失败率工具自动触发版本更新
 
-    子类可覆写 collect_tool_experiences / summarize_task_outcomes /
-    update_tool_notes 三个阶段的方法以定制行为。
+    子类可覆写各阶段方法以定制行为。
     """
 
-    def __init__(self, tool_store: ToolStore | None = None) -> None:
+    def __init__(
+        self,
+        tool_store: ToolStore | None = None,
+        global_memory: GlobalMemory | None = None,
+    ) -> None:
         self._experiences: list[ToolExperience] = []
         self._summary: TaskOutcomeSummary | None = None
         self._tool_store = tool_store  # ToolStore 实例 (可选, 用于版本更新)
+        self._global_memory = global_memory  # GlobalMemory 实例 (可选, P6)
+        # P6: 累计失败次数 (跨任务的内存统计，按工具名累计)
+        self._failure_counts: dict[str, int] = {}
 
     @property
     def experiences(self) -> list[ToolExperience]:
@@ -145,6 +155,15 @@ class PostTaskPipeline:
 
         # 阶段 3: 更新工具笔记（向 ToolGuardian 汇报）
         await self.update_tool_notes(master, self._experiences)
+
+        # 阶段 4: (P6) 全局记忆沉淀 + 工具版本更新
+        if self._global_memory is not None:
+            try:
+                await self.update_global_memory(master, self._experiences)
+            except Exception as exc:
+                logger.warning(
+                    "PostTaskPipeline: update_global_memory failed: %s", exc,
+                )
 
         logger.info(
             "PostTaskPipeline finished: %d experiences, %d/%d completed",
@@ -369,6 +388,119 @@ class PostTaskPipeline:
                             "Failed to add changelog for '%s': %s",
                             exp.tool_name, exc,
                         )
+
+    # -----------------------------------------------------------------------
+    # 阶段 4: 全局记忆沉淀 (P6)
+    # -----------------------------------------------------------------------
+
+    async def update_global_memory(
+        self,
+        master: MasterAgent,
+        experiences: list[ToolExperience],
+    ) -> None:
+        """将工具经验沉淀到全局记忆 (GlobalMemory)
+
+        1. 将每条 ToolExperience 转为 KnowledgeEntry 写入 GlobalMemory
+        2. 对失败率高的工具，使用 ToolExperienceExtractor 做语义分析
+           (失败根因 + 修复建议)，生成更有价值的经验条目
+        3. 当某工具累计失败次数达到阈值且成功率低时，
+           自动调用 trigger_tool_version_update() 创建新版本
+
+        经验专供工具管理 Agent (ToolGuardian) 使用，不注入子 Agent。
+
+        Args:
+            master: MasterAgent 实例
+            experiences: 工具经验列表
+        """
+        from youmi.knowledge.models import KnowledgeCategory
+        from youmi.knowledge.experience_extractor import ToolExperienceExtractor
+
+        if self._global_memory is None:
+            return
+
+        task_id = getattr(master, '_workflow_id', '') or ''
+        extractor = ToolExperienceExtractor()
+
+        for exp in experiences:
+            if exp.usage_count == 0:
+                continue
+
+            # 1. 写入整体使用统计经验
+            try:
+                content = ToolExperienceExtractor.to_experience_content(exp)
+                await self._global_memory.add_experience(
+                    tool_name=exp.tool_name,
+                    content=content,
+                    category=KnowledgeCategory.TOOL_EXPERIENCE,
+                    source_task_id=task_id,
+                    success_rate=exp.success_rate,
+                    metadata={"usage_count": exp.usage_count},
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Failed to write experience to GlobalMemory for '%s': %s",
+                    exp.tool_name, exc,
+                )
+                continue
+
+            # 2. 高失败率工具做语义分析，写入失败根因经验
+            if exp.failure_patterns and exp.success_rate < 0.7:
+                try:
+                    insights = await extractor.analyze_failures(
+                        exp.failure_patterns, exp.tool_name,
+                    )
+                    for insight in insights:
+                        await self._global_memory.add_experience(
+                            tool_name=exp.tool_name,
+                            content=insight,
+                            category=KnowledgeCategory.TOOL_EXPERIENCE,
+                            source_task_id=task_id,
+                            success_rate=exp.success_rate,
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to analyze failures for '%s': %s",
+                        exp.tool_name, exc,
+                    )
+
+            # 3. 累计失败次数 → 触发工具版本更新
+            failure_count = int(round(exp.usage_count * (1 - exp.success_rate)))
+            self._failure_counts[exp.tool_name] = (
+                self._failure_counts.get(exp.tool_name, 0) + failure_count
+            )
+            if (
+                self._failure_counts[exp.tool_name] >= 3
+                and exp.success_rate < 0.5
+            ):
+                fix_description = (
+                    f"全局记忆累计检测到 {self._failure_counts[exp.tool_name]} 次失败 "
+                    f"(最近成功率 {exp.success_rate:.0%}): "
+                    + "; ".join(exp.failure_patterns[:2])
+                )
+                new_tool_id = await self.trigger_tool_version_update(
+                    tool_name=exp.tool_name,
+                    fix_description=fix_description,
+                )
+                if new_tool_id:
+                    # 触发成功后记录修复经验并重置计数
+                    try:
+                        await self._global_memory.add_experience(
+                            tool_name=exp.tool_name,
+                            content=fix_description,
+                            category=KnowledgeCategory.BUG_FIX,
+                            source_task_id=task_id,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to record bug_fix experience for '%s': %s",
+                            exp.tool_name, exc,
+                        )
+                    self._failure_counts[exp.tool_name] = 0
+
+        logger.debug(
+            "PostTaskPipeline: %d experiences persisted to GlobalMemory",
+            len(experiences),
+        )
 
     # -----------------------------------------------------------------------
     # 工具版本更新触发

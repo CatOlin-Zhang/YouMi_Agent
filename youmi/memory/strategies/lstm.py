@@ -172,6 +172,19 @@ class LSTMMemoryStrategy(MemoryStrategy):
         """获取全部长期记忆条目"""
         return list(self._long_term)
 
+    async def search(self, query: str, top_k: int = 5) -> list[dict[str, str]]:
+        """关键词检索长期 + 短期记忆 (P6)
+
+        优先返回长期记忆匹配 (更稳定的知识)，其次短期记忆。
+        """
+        lt_hits = MemoryStrategy.keyword_search(self._long_term, query, top_k)
+        if len(lt_hits) >= top_k:
+            return lt_hits
+        st_hits = MemoryStrategy.keyword_search(
+            self._short_term, query, top_k - len(lt_hits),
+        )
+        return lt_hits + st_hits
+
     async def get_short_term_memories(self) -> list[dict[str, str]]:
         """获取全部短期记忆条目"""
         return list(self._short_term)

@@ -12,48 +12,29 @@
       "updated_at": 1787711131.7039587
     },
     {
-      "session_id": "sess_bf1a991bf803",
+      "session_id": "sess_dad3db974dc2",
       "type": "group",
       "name": "群聊",
-      "owner_agent_id": "0456abf58357417c",
+      "owner_agent_id": "2a36a90282134f4f",
       "member_ids": [
-        "0456abf58357417c",
-        "91f55b5a86cc418e",
-        "0a98ffb1e19d40e9",
-        "1a90b3374eab4d88",
-        "059658b715654573",
-        "8dc1cd1dc921437d",
-        "41acf47df65c42fd",
-        "bf9cb4f3960d4e21",
-        "8ab6ef5020a6477b",
-        "8fb27cf693b948d9",
-        "f48aebcf5d104889"
+        "2a36a90282134f4f"
       ],
-      "created_at": 1787712604.843958,
-      "updated_at": 1787713260.4176354
+      "created_at": 1787795106.3523417,
+      "updated_at": 1787795178.5438783
     },
     {
-      "session_id": "sess_f09ab1725dd5",
+      "session_id": "sess_69b738f35576",
       "type": "group",
       "name": "群聊",
-      "owner_agent_id": "146e591b29e54c9f",
+      "owner_agent_id": "86cf3bac68ce4585",
       "member_ids": [
-        "146e591b29e54c9f",
-        "2f8649747ed045b4"
+        "86cf3bac68ce4585",
+        "427751d533c94d65",
+        "326f200eb1e64727",
+        "d0d0c8f01c2747c8"
       ],
-      "created_at": 1787724638.7346234,
-      "updated_at": 1787724780.7010653
-    },
-    {
-      "session_id": "sess_69e141ca0dff",
-      "type": "group",
-      "name": "群聊",
-      "owner_agent_id": "4a54ae14a16f42af",
-      "member_ids": [
-        "4a54ae14a16f42af"
-      ],
-      "created_at": 1787726770.5175827,
-      "updated_at": 1787726846.5853841
+      "created_at": 1787796810.4575403,
+      "updated_at": 1787796933.6204138
     }
   ],
   "cards": {
@@ -455,6 +436,204 @@
     },
     "4a54ae14a16f42af": {
       "agent_id": "4a54ae14a16f42af",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "acdf06f90658418b": {
+      "agent_id": "acdf06f90658418b",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "09dcd0d26ca44223": {
+      "agent_id": "09dcd0d26ca44223",
+      "name": "master",
+      "role": "master",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "主协调 Agent，负责任务分析、子 Agent 实例化与工作流编排",
+      "task": "你是一个智能家居指令转换专家，负责将用户的自然语言需求转换为标准化的智能家居控制指令。\n\n【支持的指令格式】\n\n1. 单设备控制：\nSET <device_id>.<property> = <value>\n例：SET living_room.light.brightness = 80\n\n2. 场景执行：\nSCENE <scene_name>\n例：SCENE movie_mode\n\n3. 多设备批量：\nBATCH [\n  SET kitchen.light.power = ON,\n  SET kitchen.fan.speed = 2,\n  SCENE good_night\n]\n\n4. 条件触发：\nWHEN <condition> THEN <action>\n例：WHEN bedroom.temp > 28 THEN SET bedroom.ac.temp = 24\n\n【设备ID命名规范】\n- 客厅：living_room\n- 卧室：bedroom\n- 厨房：kitchen\n- 浴室：bathroom\n- 书房：study\n- 玄关：entrance\n\n【常用设备类型】\n- light（灯）：power (ON/OFF), brightness (0-100), color (warm/cool/white)\n- ac（空调）：power, temp (16-30), mode (cool/heat/auto), fan_speed\n- fan（风扇）：power, speed (1-3)\n- curtain（窗帘）：state (open/close), position (0-100)\n- tv（电视）：power, volume (0-100), channel\n- speaker（音箱）：power, volume\n\n【常用场景】\n- movie_mode（影院模式）：关主灯、开氛围灯、关窗帘、开电视\n- good_night（晚安模式）：关所有灯、关窗帘、空调设睡眠温度\n- away_mode（离家模式）：关所有灯、关空调、关电视、布防\n- home_mode（回家模式）：开玄关灯和客厅灯、空调预设温度\n- morning_mode（晨起模式）：开卧室灯、开窗帘、播放音乐\n- dinner_mode（晚餐模式）：餐厅灯调暖、播放背景音乐\n\n【工作要求】\n1. 接收用户的自然语言需求\n2. 直接输出对应的标准化指令（多条用 BATCH 包裹）\n3. 如有歧义，先按最合理默认理解转换，并在结果后用【备注】简短说明假设\n4. 不要解释转换过程，直接给出指令\n5. 输出格式清晰，可直接复制使用\n\n请等待用户输入自然语言需求，并按上述规则转换输出。"
+    },
+    "af8f4abfe1584afa": {
+      "agent_id": "af8f4abfe1584afa",
+      "name": "master",
+      "role": "master",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "主协调 Agent，负责任务分析、子 Agent 实例化与工作流编排",
+      "task": "你是一个智能家居指令转换专家，负责将用户的自然语言需求转换为标准化的智能家居控制指令。\n\n【支持的指令格式】\n\n1. 单设备控制：\nSET <device_id>.<property> = <value>\n例：SET living_room.light.brightness = 80\n\n2. 场景执行：\nSCENE <scene_name>\n例：SCENE movie_mode\n\n3. 多设备批量：\nBATCH [\n  SET kitchen.light.power = ON,\n  SET kitchen.fan.speed = 2,\n  SCENE good_night\n]\n\n4. 条件触发：\nWHEN <condition> THEN <action>\n例：WHEN bedroom.temp > 28 THEN SET bedroom.ac.temp = 24\n\n【设备ID命名规范】\n- 客厅：living_room\n- 卧室：bedroom\n- 厨房：kitchen\n- 浴室：bathroom\n- 书房：study\n- 玄关：entrance\n\n【常用设备属性】\n- light（灯）：power (ON/OFF), brightness (0-100), color (warm/cool/white)\n- ac（空调）：power, temp (16-30), mode (cool/heat/auto), fan_speed\n- fan（风扇）：power, speed (1-3)\n- curtain（窗帘）：state (open/close), position (0-100)\n- tv（电视）：power, volume (0-100), channel\n- speaker（音箱）：power, volume\n\n【常用场景】\n- movie_mode（影院模式）：关主灯、开氛围灯、关窗帘、开电视\n- good_night（晚安模式）：关所有灯、关窗帘、空调设睡眠温度\n- away_mode（离家模式）：关所有灯、关空调、关电视、布防\n- home_mode（回家模式）：开玄关灯和客厅灯、空调预设温度\n- morning_mode（晨起模式）：开卧室灯、开窗帘、播放音乐\n- dinner_mode（晚餐模式）：餐厅灯调暖、播放背景音乐\n\n【\"调亮一点\"的处理规则】\n默认将亮度提升至 100（最大）。如有其他明暗调整意图，对应处理如下：\n- \"调暗一点\" → brightness = 30\n- \"最亮\" → brightness = 100\n- \"中等亮度\" → brightness = 50\n- \"调到 80\" → brightness = 80\n\n【工作要求】\n1. 接收用户的自然语言需求，立即输出对应标准化指令\n2. 多条指令用 BATCH 包裹\n3. 直接输出指令，不要解释过程\n4. 如有歧义，简短【备注】说明假设"
+    },
+    "db40772b3f074241": {
+      "agent_id": "db40772b3f074241",
+      "name": "master",
+      "role": "master",
+      "color": "#364fc7",
+      "status": "idle",
+      "bio": "主协调 Agent，负责任务分析、子 Agent 实例化与工作流编排",
+      "task": "你是一个智能家居指令转换专家，负责将用户的自然语言需求转换为标准化的智能家居控制指令。\n\n【支持的指令格式】\n\n1. 单设备控制：\nSET <device_id>.<property> = <value>\n例：SET living_room.light.brightness = 80\n\n2. 场景执行：\nSCENE <scene_name>\n例：SCENE movie_mode\n\n3. 多设备批量：\nBATCH [\n  SET kitchen.light.power = ON,\n  SET kitchen.fan.speed = 2,\n  SCENE good_night\n]\n\n4. 条件触发（自动化任务）：\nWHEN <condition> THEN <action>\n例：WHEN bedroom.temp > 28 THEN SET bedroom.ac.temp = 24\n\n5. 触发器型自动化任务：\nTRIGGER <event> DO <action>\n例：TRIGGER user.arrive_home DO SET living_room.ac.power = ON\n\n【设备ID命名规范】\n- 客厅：living_room\n- 卧室：bedroom\n- 厨房：kitchen\n- 浴室：bathroom\n- 书房：study\n- 玄关：entrance\n\n【常用设备属性】\n- light（灯）：power (ON/OFF), brightness (0-100), color (warm/cool/white)\n- ac（空调）：power (ON/OFF), temp (16-30), mode (cool/heat/auto), fan_speed\n- fan（风扇）：power, speed (1-3)\n- curtain（窗帘）：state (open/close), position (0-100)\n- tv（电视）：power, volume (0-100), channel\n- speaker（音箱）：power, volume\n\n【常用事件触发器】\n- user.arrive_home（用户回家）\n- user.leave_home（用户离家）\n- time.<HH:MM>（定时）\n- sensor.<device>.<property> <op> <value>（传感器条件）\n\n【工作要求】\n1. 立即将自然语言需求转换为标准化指令\n2. 自动化任务优先使用 TRIGGER ... DO ... 格式；若涉及条件判断则使用 WHEN ... THEN ...\n3. 直接输出指令，不要解释过程\n4. 多条指令用 BATCH 包裹\n5. 如有歧义，简短【备注】说明假设"
+    },
+    "950fd74879784cf4": {
+      "agent_id": "950fd74879784cf4",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "4ae449c3943846d4": {
+      "agent_id": "4ae449c3943846d4",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "c0c7579ac3b34319": {
+      "agent_id": "c0c7579ac3b34319",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "20cf754984874190": {
+      "agent_id": "20cf754984874190",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "d30fd5d0739945df": {
+      "agent_id": "d30fd5d0739945df",
+      "name": "researcher",
+      "role": "researcher",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "",
+      "task": "调研HBM（高带宽内存）行业现状，输出结构化报告，需覆盖以下要点：\n\n1. **行业概述**：HBM的定义、技术原理、在AI/HPC领域的重要性\n2. **市场规模与增长**：2024-2026年全球HBM市场规模、增速预测、出货量数据\n3. **技术演进**：HBM3、HBM3e、HBM4的技术规格、量产时间表、性能对比\n4. **主要玩家与竞争格局**：\n   - 三星、SK海力士、美光三大厂商的市场份额、产能、客户结构\n   - 各家技术领先程度、良率情况\n5. **下游需求**：英伟达、AMD、谷歌、Meta等AI芯片厂商的HBM采购情况；AI服务器、数据中心的需求驱动\n6. **供需情况**：当前供需是否紧张、价格趋势、产能扩张计划\n7. **产业链**：上游（晶圆、封装、设备）和下游（AI芯片厂商）布局\n8. **风险因素**：技术路线风险、客户集中度风险、地缘政治风险\n\n请使用网络搜索和资料收集工具获取最新数据（2024-2025年），输出为中文报告，结构清晰、数据详实。"
+    },
+    "8c82383b896843d2": {
+      "agent_id": "8c82383b896843d2",
+      "name": "investment_analyst",
+      "role": "investment_analyst",
+      "color": "#5c940d",
+      "status": "idle",
+      "bio": "",
+      "task": "为HBM（高带宽内存）行业设计一套系统化的投资策略框架，输出为中文报告，需覆盖：\n\n1. **行业投资逻辑**：为什么HBM是值得布局的赛道（AI算力基础设施刚需、技术壁垒高、供需偏紧）\n2. **投资周期判断**：当前处于HBM周期的哪个阶段（导入期/成长期/成熟期），未来1-2年的景气度判断\n3. **核心投资主线**：\n   - 主线一：HBM原厂（三星、SK海力士、美光）的竞争格局与投资优先级\n   - 主线二：HBM产业链上游受益公司（设备、材料、封装、测试环节）\n   - 主线三：A股/港股/美股的相关标的及映射关系\n4. **标的筛选维度**：技术领先性、客户绑定、产能弹性、估值合理性\n5. **投资节奏建议**：\n   - 短期（6个月）策略\n   - 中期（1-2年）策略\n   - 长期（3-5年）策略\n6. **风险管理**：技术迭代风险（HBM4/5路线变化）、客户集中风险、估值泡沫风险、出口管制风险\n7. **具体可关注的标的清单**（按产业链环节分类，A股、港股、美股各列代表性公司）\n\n报告需结合研究员提供的行业现状，给出可操作性强的投资建议，不需要写具体代码。"
+    },
+    "474e8b978e6c43c1": {
+      "agent_id": "474e8b978e6c43c1",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "2a36a90282134f4f": {
+      "agent_id": "2a36a90282134f4f",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "7e3debfab6da4534": {
+      "agent_id": "7e3debfab6da4534",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "e10698497f6c4eb8": {
+      "agent_id": "e10698497f6c4eb8",
+      "name": "researcher",
+      "role": "researcher",
+      "color": "#2b8a3e",
+      "status": "idle",
+      "bio": "",
+      "task": "调研HBM行业现状，包括市场规模、主要厂商、技术路线"
+    },
+    "dc4cc34fe4cd428d": {
+      "agent_id": "dc4cc34fe4cd428d",
+      "name": "analyst",
+      "role": "analyst",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "",
+      "task": "基于调研结果分析HBM行业投资机会与风险"
+    },
+    "e277faebf7a44b54": {
+      "agent_id": "e277faebf7a44b54",
+      "name": "researcher",
+      "role": "researcher",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "",
+      "task": "使用web_fetch抓取相关网站和数据库中的内容，用于文献调研"
+    },
+    "86cf3bac68ce4585": {
+      "agent_id": "86cf3bac68ce4585",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "427751d533c94d65": {
+      "agent_id": "427751d533c94d65",
+      "name": "planner",
+      "role": "planner",
+      "color": "#c2255c",
+      "status": "idle",
+      "bio": "",
+      "task": "为回家时创建一个子 Agent 来控制米家设备。该子 Agent 应在用户返回家中时运行，并打开指定的米家空调。"
+    },
+    "326f200eb1e64727": {
+      "agent_id": "326f200eb1e64727",
+      "name": "listener",
+      "role": "listener",
+      "color": "#5f3dc4",
+      "status": "idle",
+      "bio": "",
+      "task": "创建一个监听用户回家事件的子 Agent。当用户返回家中时运行第一个子 Agent 来打开米家空调。"
+    },
+    "d0d0c8f01c2747c8": {
+      "agent_id": "d0d0c8f01c2747c8",
+      "name": "home_agent",
+      "role": "home_agent",
+      "color": "#d6336c",
+      "status": "idle",
+      "bio": "",
+      "task": "在用户回家时打开指定的米家空调"
+    },
+    "6658306671c54046": {
+      "agent_id": "6658306671c54046",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "2c2aa9c8c19a4295": {
+      "agent_id": "2c2aa9c8c19a4295",
       "name": "MasterAgent",
       "role": "master",
       "color": "#2f7cf6",

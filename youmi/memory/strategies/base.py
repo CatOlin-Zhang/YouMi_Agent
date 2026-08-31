@@ -40,6 +40,7 @@ class MemoryStrategy(ABC):
     - initialize(): 策略初始化 (如建立数据库连接)
     - clear(): 清空记忆
     - snapshot(): 返回状态快照
+    - search(): 记忆检索 (默认关键词匹配, P6)
     """
 
     strategy_name: str = "base"
@@ -105,6 +106,55 @@ class MemoryStrategy(ABC):
         用于归档、持久化、生成摘要等。默认无操作。
         """
         pass
+
+    async def search(self, query: str, top_k: int = 5) -> list[dict[str, str]]:
+        """检索记忆 (P6, 可选实现)
+
+        默认返回空列表。子类可覆写以提供检索能力;
+        无 Embedding 依赖时使用关键词匹配 (见 keyword_search)。
+
+        Args:
+            query: 查询文本
+            top_k: 最多返回条数
+
+        Returns:
+            匹配的消息列表 (OpenAI messages 格式)
+        """
+        return []
+
+    @staticmethod
+    def keyword_search(
+        messages: list[dict[str, str]],
+        query: str,
+        top_k: int = 5,
+    ) -> list[dict[str, str]]:
+        """关键词匹配检索 (无向量依赖的降级方案)
+
+        空格分词匹配 + 完整查询子串匹配 (支持中文)。
+
+        Args:
+            messages: 候选消息列表
+            query: 查询文本
+            top_k: 最多返回条数
+
+        Returns:
+            按匹配度降序的消息列表 (无匹配时返回空)
+        """
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return []
+
+        scored: list[tuple[dict[str, str], int]] = []
+        for msg in messages:
+            content = msg.get("content", "").lower()
+            score = sum(1 for word in query_lower.split() if word in content)
+            # 完整查询作为子串直接命中 (支持中文整句)
+            if query_lower in content:
+                score += 2
+            scored.append((msg, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [m for m, s in scored[:top_k] if s > 0]
 
     async def snapshot(self) -> dict[str, Any]:
         """返回当前记忆状态快照 (调试/可观测)

@@ -354,13 +354,16 @@ class TestMasterTools:
         assert data[0]["role"] == "coder"
 
     async def test_list_available_roles_tool(self):
-        """list_available_roles 工具应返回已配置的角色列表"""
+        """list_available_roles 工具应返回预配置角色 + 自由创建说明"""
         config = make_master_config()
         master = MasterAgent(config)
 
         result = await master.tool_registry.execute("list_available_roles", {})
         data = json.loads(result)
-        assert "master" in data["available_roles"]
+        assert "master" in data["preconfigured_roles"]
+        assert "description" in data
+        # 确保返回的描述提及可以自由创建任意角色
+        assert "自由" in data["description"] or "任意" in data["description"]
 
 
 # ---------------------------------------------------------------------------
