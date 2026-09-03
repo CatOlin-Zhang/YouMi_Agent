@@ -108,6 +108,15 @@ def _search_new_tools_schema() -> dict[str, Any]:
                             "提供此参数时执行加载而非搜索"
                         ),
                     },
+                    "reject": {
+                        "type": "string",
+                        "description": (
+                            "要否决的候选工具名（多个用逗号分隔）。"
+                            "提供此参数时将这些候选加入排除列表，"
+                            "并用最近的查询自动重新搜索返回新候选；"
+                            "连续否决 3 次后终止搜索并告知没有该功能的工具"
+                        ),
+                    },
                 },
                 "required": [],
             },
@@ -158,6 +167,9 @@ class ToolBridge:
         self._context = context
         # 召回确认闭环状态
         self._rejected_tools: set[str] = set()
+        # 召回确认闭环: 上次搜索词 (reject 模式自动重搜用) + 连续否决计数
+        self._last_search_query: str = ""
+        self._reject_count: int = 0
         # search_new_tools 元工具开关
         self._search_meta_tool = search_meta_tool
 
@@ -455,13 +467,21 @@ class ToolBridge:
 
     async def _search_new_tools_impl(
         self, arguments: dict[str, Any],
+        _is_research: bool = False,
     ) -> MCPToolResult:
         """执行 search_new_tools 元工具 — 在本 Bridge 上执行，不经过 MCPServer
 
-        两种模式:
+        三种模式:
         - 搜索: query + top_k → Vault 语义/关键词检索"当前不可见"的工具，
           返回候选列表
+        - 否决: reject=<工具名>[,...] → 排除指定候选并用最近查询自动重搜
+          (召回确认闭环，多次否决后终止)
         - 加载: load=<工具名> → 授权（白名单）+ 提升为 HOT，下一轮即可调用
+
+        Args:
+            arguments: LLM 传入的参数 (query/top_k/load/reject)
+            _is_research: 内部标记 — reject 自动重搜时为 True，
+                保留连续否决计数不重置（否决计数属于同一搜索会话）
         """
         self._call_count += 1
 
@@ -470,16 +490,28 @@ class ToolBridge:
         if load_name:
             return await self._load_discovered_tool(load_name)
 
+        # 否决模式 (召回确认闭环)
+        reject_raw = str(arguments.get("reject") or "").strip()
+        if reject_raw:
+            return await self._reject_and_research(reject_raw, arguments)
+
         # 搜索模式
         query = str(arguments.get("query") or "").strip()
         if not query:
-            return MCPToolResult.failure("参数错误: query 与 load 至少提供一个")
+            return MCPToolResult.failure("参数错误: query 与 load/reject 至少提供一个")
         try:
             top_k = int(arguments.get("top_k", 5))
         except (TypeError, ValueError):
             top_k = 5
 
-        exclude = self._visible_tool_names()
+        # 新的搜索会话开始: 重置连续否决计数, 记录查询词
+        # (reject 自动重搜不算新会话，保留否决计数)
+        if not _is_research:
+            self._reject_count = 0
+        self._last_search_query = query
+
+        # 已否决的候选同样视为"不可见"，避免重复推荐
+        exclude = self._visible_tool_names() | self._rejected_tools
         candidates: list[dict[str, Any]] = []
 
         # 路径 1: ToolVault 语义搜索（向量 → 关键词回退）
@@ -543,12 +575,56 @@ class ToolBridge:
         if candidates:
             payload["hint"] = (
                 "找到以上候选工具。如需使用，再次调用本工具并传 "
-                'load="<工具名>" 即可加载（自动授权并注入上下文）。'
+                'load="<工具名>" 即可加载（自动授权并注入上下文）；'
+                "如均不符合需求，可传 reject=\"<工具名>\" 否决后重新搜索。"
+            )
+        elif self._rejected_tools:
+            payload["message"] = (
+                f"所有候选均已被否决（{len(self._rejected_tools)} 个）。"
+                "当前工具库中没有符合该需求的工具。"
             )
         else:
             payload["message"] = "没有找到匹配的新工具，可尝试更换关键词描述。"
 
         return MCPToolResult.success(json.dumps(payload, ensure_ascii=False))
+
+    async def _reject_and_research(
+        self,
+        reject_raw: str,
+        arguments: dict[str, Any],
+    ) -> MCPToolResult:
+        """否决候选并自动重搜 — 召回确认闭环
+
+        LLM 判断候选不符合需求时，通过 reject 参数否决（可多个），
+        Bridge 排除这些候选后用最近一次查询自动重搜。
+        连续否决达到上限 (3 次) 后终止，明确告知没有该功能的工具。
+        """
+        rejected_names = [n.strip() for n in reject_raw.split(",") if n.strip()]
+        for name in rejected_names:
+            self.reject_search_result(name)
+        self._reject_count += 1
+
+        if self._reject_count >= 3:
+            return MCPToolResult.success(json.dumps({
+                "candidates": [],
+                "total": 0,
+                "terminated": True,
+                "message": (
+                    f"已连续否决 {self._reject_count} 次候选，"
+                    "判定工具库中没有该功能的工具，搜索终止。"
+                ),
+            }, ensure_ascii=False))
+
+        # 用最近一次查询重搜（可被本次 arguments.query 覆盖）
+        query = str(arguments.get("query") or "").strip() or self._last_search_query
+        if not query:
+            return MCPToolResult.failure(
+                "参数错误: reject 模式需要先有一次成功的搜索（或同时提供 query）"
+            )
+
+        return await self._search_new_tools_impl(
+            {"query": query}, _is_research=True,
+        )
 
     async def _load_discovered_tool(self, tool_name: str) -> MCPToolResult:
         """加载发现的工具: 授权 + 提升为 HOT
@@ -584,6 +660,10 @@ class ToolBridge:
             self._context.record_usage(tool_name)
         elif self._vault is not None:
             self._vault.record_usage(tool_name)
+
+        # 确认语义: 加载成功即确认当前搜索会话，清理否决状态
+        self._rejected_tools.clear()
+        self._reject_count = 0
 
         return MCPToolResult.success(json.dumps({
             "loaded": tool_name,

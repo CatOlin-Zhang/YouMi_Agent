@@ -6,6 +6,7 @@ PlanMemory — WorkflowPlan 记忆复用层
 只需微调各步骤的 task 文本，不重复 LLM 全量规划。
 
 存储：独立 SQLite 文件（默认 .youmi_plans.db），与 GlobalMemory 解耦。
+向量检索优先使用 sqlite-vec vec0 KNN，不可用时降级为纯 Python 余弦相似度。
 
 用法::
 
@@ -32,12 +33,19 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from youmi._vec_utils import (
+    cosine_similarity_python,
+    cosine_to_l2,
+    l2_to_cosine,
+    normalize_vector,
+    try_load_sqlite_vec,
+    vec_to_json,
+)
 from youmi.coordinator.plan import WorkflowPlan
 
 if TYPE_CHECKING:
@@ -45,13 +53,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 向后兼容
+_cosine_similarity = cosine_similarity_python
+
 # ---------------------------------------------------------------------------
 # 建表 SQL
 # ---------------------------------------------------------------------------
 
 _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS workflow_plans (
-    plan_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT UNIQUE NOT NULL,
     task_fingerprint TEXT NOT NULL,
     task_text TEXT NOT NULL,
     plan_json TEXT NOT NULL,
@@ -65,6 +77,7 @@ CREATE INDEX IF NOT EXISTS idx_plans_fp ON workflow_plans(task_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_plans_success ON workflow_plans(success);
 CREATE INDEX IF NOT EXISTS idx_plans_updated ON workflow_plans(updated_at DESC);
 
+-- 降级用 JSON 向量表
 CREATE TABLE IF NOT EXISTS plan_vectors (
     plan_id TEXT PRIMARY KEY REFERENCES workflow_plans(plan_id) ON DELETE CASCADE,
     embedding_json TEXT NOT NULL,
@@ -76,18 +89,6 @@ CREATE TABLE IF NOT EXISTS plan_vectors (
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """计算余弦相似度（纯 Python 实现，与 GlobalMemory 保持一致）"""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
 
 def _task_fingerprint(task: str) -> str:
     """生成任务文本的 MD5 指纹（用于精确匹配快速路径）"""
@@ -120,8 +121,9 @@ class PlanMemory:
 
     Args:
         db_path: SQLite 文件路径（默认 .youmi_plans.db）
-        embedding_client: 向量化客户端（可选），有则走余弦相似度，否则降级关键词匹配
+        embedding_client: 向量化客户端（可选），有则走 sqlite-vec KNN，否则降级关键词匹配
         similarity_threshold: 命中阈值（默认 0.85），低于此值不复用
+        embedding_dim: Embedding 向量维度 (默认 768)
     """
 
     def __init__(
@@ -129,19 +131,22 @@ class PlanMemory:
         db_path: str = ".youmi_plans.db",
         embedding_client: EmbeddingClient | None = None,
         similarity_threshold: float = 0.85,
+        embedding_dim: int = 768,
     ) -> None:
         self._db_path = db_path
         self._embedding_client = embedding_client
         self._similarity_threshold = similarity_threshold
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
+        self._embedding_dim = embedding_dim
+        self._vec_available: bool = False
 
     # -----------------------------------------------------------------------
     # 生命周期
     # -----------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        """建库建表（幂等）"""
+        """建库建表（幂等），并尝试加载 sqlite-vec"""
         def _init() -> None:
             conn = sqlite3.connect(self._db_path, check_same_thread=False)
             conn.executescript(_CREATE_TABLES_SQL)
@@ -149,7 +154,24 @@ class PlanMemory:
             return conn
 
         self._conn = await asyncio.to_thread(_init)
-        logger.info("PlanMemory initialized: db_path=%s", self._db_path)
+
+        # 尝试加载 sqlite-vec
+        self._vec_available = await asyncio.to_thread(
+            try_load_sqlite_vec, self._conn,
+        )
+        if self._vec_available:
+            dim = self._embedding_dim
+            vec_sql = (
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_plans_idx "
+                f"USING vec0(embedding float[{dim}])"
+            )
+            await asyncio.to_thread(self._conn.execute, vec_sql)
+            await asyncio.to_thread(self._conn.commit)
+
+        logger.info(
+            "PlanMemory initialized: db_path=%s, vec=%s",
+            self._db_path, self._vec_available,
+        )
 
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -215,11 +237,18 @@ class PlanMemory:
         async with self._lock:
             plan_id = await asyncio.to_thread(_upsert)
 
+            # 获取稳定的 id
+            row_id = await asyncio.to_thread(
+                lambda: self._conn.execute(
+                    "SELECT id FROM workflow_plans WHERE plan_id = ?", (plan_id,),
+                ).fetchone()[0]
+            )
+
         # 尝试向量化（失败不阻塞）
         if self._embedding_client is not None:
             try:
                 embedding = await self._embedding_client.embed_one(user_task)
-                await self._save_vector(plan_id, embedding)
+                await self._save_vector(plan_id, row_id, embedding)
             except Exception as exc:
                 logger.warning("PlanMemory: failed to vectorize plan '%s': %s", plan_id, exc)
 
@@ -229,20 +258,33 @@ class PlanMemory:
         )
         return plan_id
 
-    async def _save_vector(self, plan_id: str, embedding: list[float]) -> None:
+    async def _save_vector(
+        self, plan_id: str, row_id: int, embedding: list[float],
+    ) -> None:
         """写入或更新向量索引"""
         if self._conn is None:
             return
         now = datetime.now(timezone.utc).isoformat()
-        embedding_json = json.dumps(embedding)
 
         def _write() -> None:
-            self._conn.execute(
-                """INSERT INTO plan_vectors (plan_id, embedding_json, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(plan_id) DO UPDATE SET embedding_json=excluded.embedding_json, updated_at=excluded.updated_at""",
-                (plan_id, embedding_json, now),
-            )
+            if self._vec_available:
+                norm = normalize_vector(embedding)
+                self._conn.execute(
+                    "DELETE FROM vec_plans_idx WHERE rowid = ?", (row_id,),
+                )
+                self._conn.execute(
+                    "INSERT INTO vec_plans_idx(rowid, embedding) VALUES (?, ?)",
+                    (row_id, vec_to_json(norm)),
+                )
+            else:
+                self._conn.execute(
+                    """INSERT INTO plan_vectors (plan_id, embedding_json, updated_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(plan_id) DO UPDATE SET
+                           embedding_json=excluded.embedding_json,
+                           updated_at=excluded.updated_at""",
+                    (plan_id, json.dumps(embedding), now),
+                )
             self._conn.commit()
 
         await asyncio.to_thread(_write)
@@ -289,7 +331,53 @@ class PlanMemory:
         user_task: str,
         top_k: int,
     ) -> list[tuple[WorkflowPlan, float]]:
-        """向量余弦相似度检索"""
+        """向量检索（优先 sqlite-vec KNN，降级 Python 余弦相似度）"""
+        if self._vec_available:
+            return await self._vec0_search(query_vec, top_k)
+        else:
+            return await self._json_search(query_vec, top_k)
+
+    async def _vec0_search(
+        self,
+        query_vec: list[float],
+        top_k: int,
+    ) -> list[tuple[WorkflowPlan, float]]:
+        """sqlite-vec vec0 KNN 检索"""
+        norm_query = normalize_vector(query_vec)
+        fetch_k = top_k * 3
+
+        def _search():
+            return self._conn.execute(
+                """SELECT wp.plan_id, wp.plan_json, v.distance
+                   FROM vec_plans_idx v
+                   JOIN workflow_plans wp ON wp.id = v.rowid
+                   WHERE wp.success = 1
+                     AND v.embedding MATCH ?
+                     AND k = ?
+                   ORDER BY v.distance""",
+                (vec_to_json(norm_query), fetch_k),
+            ).fetchall()
+
+        rows = await asyncio.to_thread(_search)
+        scored: list[tuple[WorkflowPlan, float]] = []
+        for pid, plan_json, distance in rows:
+            sim = l2_to_cosine(distance)
+            if sim >= self._similarity_threshold:
+                try:
+                    plan = WorkflowPlan.model_validate_json(plan_json)
+                    scored.append((plan, sim))
+                except Exception as exc:
+                    logger.warning("PlanMemory: failed to parse plan '%s': %s", pid, exc)
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+    async def _json_search(
+        self,
+        query_vec: list[float],
+        top_k: int,
+    ) -> list[tuple[WorkflowPlan, float]]:
+        """降级: JSON 向量表 + Python 余弦相似度"""
         def _load_all() -> list[tuple[str, str, list[float]]]:
             rows = self._conn.execute(
                 """SELECT wp.plan_id, wp.plan_json, pv.embedding_json
@@ -311,7 +399,7 @@ class PlanMemory:
         rows = await asyncio.to_thread(_load_all)
         scored: list[tuple[WorkflowPlan, float]] = []
         for pid, plan_json, emb in rows:
-            sim = _cosine_similarity(query_vec, emb)
+            sim = cosine_similarity_python(query_vec, emb)
             if sim >= self._similarity_threshold:
                 try:
                     plan = WorkflowPlan.model_validate_json(plan_json)
@@ -365,7 +453,14 @@ class PlanMemory:
             success = self._conn.execute(
                 "SELECT COUNT(*) FROM workflow_plans WHERE success=1"
             ).fetchone()[0]
-            vectorized = self._conn.execute("SELECT COUNT(*) FROM plan_vectors").fetchone()[0]
+            if self._vec_available:
+                vectorized = self._conn.execute(
+                    "SELECT COUNT(*) FROM vec_plans_idx"
+                ).fetchone()[0]
+            else:
+                vectorized = self._conn.execute(
+                    "SELECT COUNT(*) FROM plan_vectors"
+                ).fetchone()[0]
             return {"total": total, "success": success, "vectorized": vectorized}
 
         return await asyncio.to_thread(_query)

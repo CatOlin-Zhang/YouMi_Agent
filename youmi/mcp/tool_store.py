@@ -1,16 +1,18 @@
 """
 ToolStore — 工具持久化存储层
 
-基于 SQLite + JSON 向量列的工具持久化与向量搜索:
+基于 SQLite + sqlite-vec 向量搜索的工具持久化与语义检索:
 - tools 表: 工具元数据 + 版本链 (version, parent_version_id)
-- vec_tools 表: 向量索引 (embedding 序列化为 JSON)
+- vec_tools_idx 表: sqlite-vec vec0 虚拟表 (归一化向量, KNN 查询)
+- vec_tools 表: 降级用 JSON 向量列 (sqlite-vec 不可用时)
 - tool_changelogs 表: 同版本内的 bug 修复记录
 - tool_aliases 表: 别名映射 (Skill 引用旧版本)
 - tool_tags 表: 工具标签
 - tool_dependencies 表: 工具依赖关系
 
-使用 Python 内置 sqlite3 + asyncio.to_thread 实现异步操作，
-无需额外依赖。向量搜索通过 Python 级余弦相似度计算实现。
+使用 Python 内置 sqlite3 + asyncio.to_thread 实现异步操作。
+向量搜索优先使用 sqlite-vec 的 vec0 KNN 查询，
+扩展不可用时降级为纯 Python 余弦相似度计算。
 
 用法::
 
@@ -44,6 +46,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from youmi._vec_utils import (
+    cosine_similarity_python,
+    cosine_to_l2,
+    l2_to_cosine,
+    normalize_vector,
+    try_load_sqlite_vec,
+    vec_to_json,
+)
 from youmi.core.tool import ToolDefinition, ToolVersion, bump_version
 
 if TYPE_CHECKING:
@@ -52,13 +62,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 向后兼容: 保留旧名称供测试和其他模块引用
+_cosine_similarity = cosine_similarity_python
+
 # ---------------------------------------------------------------------------
 # 建表 SQL
 # ---------------------------------------------------------------------------
 
 _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS tools (
-    tool_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_id TEXT UNIQUE NOT NULL,
     tool_name TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT '0.0.1',
     parent_version_id TEXT,
@@ -76,6 +90,7 @@ CREATE TABLE IF NOT EXISTS tools (
 CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tools_provider ON tools(provider_id);
 
+-- 降级用 JSON 向量表 (仅当 sqlite-vec 不可用时使用)
 CREATE TABLE IF NOT EXISTS vec_tools (
     tool_id TEXT PRIMARY KEY REFERENCES tools(tool_id),
     tool_name TEXT NOT NULL,
@@ -118,57 +133,44 @@ CREATE TABLE IF NOT EXISTS tool_dependencies (
 
 
 # ---------------------------------------------------------------------------
-# 辅助: 余弦相似度 (纯 Python)
-# ---------------------------------------------------------------------------
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """计算两个向量的余弦相似度"""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-
-    import math
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-
-    return dot / (norm_a * norm_b)
-
-
-# ---------------------------------------------------------------------------
 # ToolStore 核心
 # ---------------------------------------------------------------------------
 
 class ToolStore:
-    """工具持久化存储层 — SQLite + 向量搜索
+    """工具持久化存储层 — SQLite + sqlite-vec 向量搜索
 
     管理工具的完整定义、语义向量、版本链、变更日志和元数据。
     与 ToolVault 配合: ToolVault 作为内存缓存层，ToolStore 作为持久化层。
+
+    向量搜索优先使用 sqlite-vec 的 vec0 KNN 查询（高效），
+    扩展不可用时降级为纯 Python 余弦相似度计算。
 
     Args:
         db_path: SQLite 数据库文件路径。
             ":memory:" 使用内存数据库 (测试用)。
             默认 ".youmi_tools.db" (当前工作目录)。
         embedding_client: EmbeddingClient 实例 (None = 不启用向量搜索)
+        embedding_dim: Embedding 向量维度 (默认 768, 对应 nomic-embed-text)
     """
 
     def __init__(
         self,
         db_path: str = ".youmi_tools.db",
         embedding_client: EmbeddingClient | None = None,
+        embedding_dim: int = 768,
     ) -> None:
         self._db_path = db_path
         self._conn: sqlite3.Connection | None = None
         self._embedding_client = embedding_client
+        self._embedding_dim = embedding_dim
+        self._vec_available: bool = False
 
     # ==================================================================
     # 生命周期
     # ==================================================================
 
     async def initialize(self) -> None:
-        """建库建表 (幂等: 已初始化时跳过)"""
+        """建库建表 (幂等: 已初始化时跳过)，并尝试加载 sqlite-vec"""
         if self._conn is not None:
             return
 
@@ -181,7 +183,27 @@ class ToolStore:
         await asyncio.to_thread(self._conn.execute, "PRAGMA foreign_keys = ON;")
         await asyncio.to_thread(self._conn.executescript, _CREATE_TABLES_SQL)
         await asyncio.to_thread(self._conn.commit)
-        logger.info("ToolStore initialized: %s", self._db_path)
+
+        # 尝试加载 sqlite-vec 扩展
+        self._vec_available = await asyncio.to_thread(
+            try_load_sqlite_vec, self._conn,
+        )
+        if self._vec_available:
+            dim = self._embedding_dim
+            vec_sql = (
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_tools_idx "
+                f"USING vec0(embedding float[{dim}])"
+            )
+            await asyncio.to_thread(self._conn.execute, vec_sql)
+            await asyncio.to_thread(self._conn.commit)
+            logger.info(
+                "ToolStore initialized with sqlite-vec: %s (dim=%d)",
+                self._db_path, dim,
+            )
+        else:
+            logger.info(
+                "ToolStore initialized (fallback mode): %s", self._db_path,
+            )
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -225,14 +247,15 @@ class ToolStore:
             try:
                 # 检查是否已存在
                 existing = cursor.execute(
-                    "SELECT tool_id, version FROM tools WHERE tool_name = ? ORDER BY created_at DESC LIMIT 1",
+                    "SELECT id, tool_id, version FROM tools WHERE tool_name = ? ORDER BY created_at DESC LIMIT 1",
                     (entry.tool_name,),
                 ).fetchone()
 
                 parent_id = None
                 if existing:
-                    parent_id = existing[0]
+                    parent_id = existing[1]  # tool_id of previous version
 
+                # INSERT ... ON CONFLICT DO UPDATE 保持 id 稳定
                 cursor.execute(
                     """INSERT INTO tools (tool_id, tool_name, version, parent_version_id,
                                           provider_id, summary, definition_json,
@@ -253,25 +276,24 @@ class ToolStore:
                     ),
                 )
 
-                # 更新向量 (如果有 embedding)
+                # 获取稳定的 id (rowid)
+                row = cursor.execute(
+                    "SELECT id FROM tools WHERE tool_id = ?", (tool_id,),
+                ).fetchone()
+                row_id = row[0]
+
+                # 更新向量
                 if entry.embedding:
-                    cursor.execute(
-                        """INSERT INTO vec_tools (tool_id, tool_name, embedding_json, updated_at)
-                           VALUES (?, ?, ?, ?)
-                           ON CONFLICT(tool_id) DO UPDATE SET
-                               embedding_json = excluded.embedding_json,
-                               updated_at = excluded.updated_at
-                        """,
-                        (tool_id, entry.tool_name, json.dumps(entry.embedding), now),
-                    )
+                    self._write_vec(cursor, row_id, tool_id, entry.tool_name, entry.embedding, now)
 
                 conn.commit()
+                return row_id
             except Exception:
                 conn.rollback()
                 raise
 
-        await asyncio.to_thread(_upsert)
-        logger.debug("ToolStore: upserted '%s' (id=%s)", entry.tool_name, tool_id)
+        row_id = await asyncio.to_thread(_upsert)
+        logger.debug("ToolStore: upserted '%s' (id=%s, row_id=%s)", entry.tool_name, tool_id, row_id)
         return tool_id
 
     async def get_tool(self, tool_name: str, version: str | None = None) -> ToolEntry | None:
@@ -362,7 +384,7 @@ class ToolStore:
             try:
                 if version:
                     tool_id = f"{tool_name}@{version}"
-                    conn.execute("DELETE FROM vec_tools WHERE tool_id = ?", (tool_id,))
+                    self._delete_vec_for_tool(conn, tool_id)
                     conn.execute("DELETE FROM tool_changelogs WHERE tool_id = ?", (tool_id,))
                     conn.execute("DELETE FROM tool_tags WHERE tool_id = ?", (tool_id,))
                     conn.execute("DELETE FROM tool_aliases WHERE tool_id = ?", (tool_id,))
@@ -375,7 +397,7 @@ class ToolStore:
                         "SELECT tool_id FROM tools WHERE tool_name = ?", (tool_name,)
                     ).fetchall()]
                     for tid in tool_ids:
-                        conn.execute("DELETE FROM vec_tools WHERE tool_id = ?", (tid,))
+                        self._delete_vec_for_tool(conn, tid)
                         conn.execute("DELETE FROM tool_changelogs WHERE tool_id = ?", (tid,))
                         conn.execute("DELETE FROM tool_tags WHERE tool_id = ?", (tid,))
                         conn.execute("DELETE FROM tool_aliases WHERE tool_id = ?", (tid,))
@@ -453,22 +475,26 @@ class ToolStore:
                     ),
                 )
 
-                # 如果有 embedding_client，生成新向量
                 conn.commit()
+                # 获取新行的稳定 id
+                row = cursor.execute(
+                    "SELECT id FROM tools WHERE tool_id = ?", (new_tool_id,),
+                ).fetchone()
+                new_row_id = row[0] if row else None
             except Exception:
                 conn.rollback()
                 raise
 
-            return new_tool_id, new_version, old_tool_id
+            return new_tool_id, new_version, old_tool_id, new_row_id
 
-        new_tool_id, new_version, old_tool_id = await asyncio.to_thread(_create)
+        new_tool_id, new_version, old_tool_id, new_row_id = await asyncio.to_thread(_create)
 
         # 异步生成向量
-        if self._embedding_client:
+        if self._embedding_client and new_row_id is not None:
             try:
                 text = f"{tool_name}: {new_definition.description}"
                 vec = await self._embedding_client.embed_one(text)
-                await self._update_vec_embedding(new_tool_id, tool_name, vec)
+                await self._write_vec_async(new_row_id, new_tool_id, tool_name, vec)
             except Exception as exc:
                 logger.warning("ToolStore: embedding failed for new version: %s", exc)
 
@@ -578,36 +604,67 @@ class ToolStore:
 
         conn = self._ensure_conn()
 
-        def _get_defn():
+        def _get():
             row = conn.execute(
-                "SELECT tool_id, definition_json FROM tools WHERE tool_name = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT id, tool_id, definition_json FROM tools WHERE tool_name = ? ORDER BY created_at DESC LIMIT 1",
                 (tool_name,),
             ).fetchone()
             return row
 
-        row = await asyncio.to_thread(_get_defn)
+        row = await asyncio.to_thread(_get)
         if row is None:
             return
 
-        tool_id, defn_json = row
+        row_id, tool_id, defn_json = row
         defn = ToolDefinition.model_validate_json(defn_json)
         text = f"{tool_name}: {defn.description}"
 
         try:
             vec = await self._embedding_client.embed_one(text)
-            await self._update_vec_embedding(tool_id, tool_name, vec)
+            await self._write_vec_async(row_id, tool_id, tool_name, vec)
         except Exception as exc:
             logger.warning("ToolStore: embedding failed for '%s': %s", tool_name, exc)
 
-    async def _update_vec_embedding(
-        self, tool_id: str, tool_name: str, embedding: list[float],
+    async def _write_vec_async(
+        self, row_id: int, tool_id: str, tool_name: str, embedding: list[float],
     ) -> None:
-        """写入向量到 vec_tools 表"""
+        """异步写入向量到 vec0 或 vec_tools 表"""
         conn = self._ensure_conn()
         now = datetime.utcnow().isoformat()
 
-        def _update():
-            conn.execute(
+        def _write():
+            cursor = conn.cursor()
+            self._write_vec(cursor, row_id, tool_id, tool_name, embedding, now)
+            conn.commit()
+
+        await asyncio.to_thread(_write)
+
+    def _write_vec(
+        self,
+        cursor: sqlite3.Cursor,
+        row_id: int,
+        tool_id: str,
+        tool_name: str,
+        embedding: list[float],
+        now: str,
+    ) -> None:
+        """写入向量到 vec0 (优先) 或 vec_tools (降级)。
+
+        必须在事务内调用。
+        """
+        if self._vec_available:
+            # vec0 不支持 UPSERT，使用 DELETE + INSERT
+            norm = normalize_vector(embedding)
+            cursor.execute(
+                "DELETE FROM vec_tools_idx WHERE rowid = ?", (row_id,),
+            )
+            cursor.execute(
+                "INSERT INTO vec_tools_idx(rowid, embedding) VALUES (?, ?)",
+                (row_id, vec_to_json(norm)),
+            )
+        else:
+            # 降级: 写入 JSON 向量表
+            cursor.execute(
                 """INSERT INTO vec_tools (tool_id, tool_name, embedding_json, updated_at)
                    VALUES (?, ?, ?, ?)
                    ON CONFLICT(tool_id) DO UPDATE SET
@@ -616,9 +673,19 @@ class ToolStore:
                 """,
                 (tool_id, tool_name, json.dumps(embedding), now),
             )
-            conn.commit()
 
-        await asyncio.to_thread(_update)
+    def _delete_vec_for_tool(self, conn: sqlite3.Connection, tool_id: str) -> None:
+        """删除指定工具的所有向量 (vec0 + vec_tools)"""
+        if self._vec_available:
+            row = conn.execute(
+                "SELECT id FROM tools WHERE tool_id = ?", (tool_id,),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "DELETE FROM vec_tools_idx WHERE rowid = ?", (row[0],),
+                )
+        # 始终清理降级表
+        conn.execute("DELETE FROM vec_tools WHERE tool_id = ?", (tool_id,))
 
     async def search(
         self,
@@ -631,9 +698,10 @@ class ToolStore:
 
         流程:
         1. 将 query 通过 embedding_client 生成向量
-        2. 从 vec_tools 读取所有向量，计算余弦相似度
-        3. 过滤 min_score 以下和 exclude 中的结果
-        4. 按分数降序返回 Top-K
+        2. [sqlite-vec] 归一化后执行 KNN 查询，L2 距离转换为余弦相似度
+        3. [降级] 从 vec_tools 读取所有向量，Python 级余弦相似度计算
+        4. 过滤 min_score 以下和 exclude 中的结果
+        5. 按分数降序返回 Top-K
 
         如果无 embedding_client，回退到关键词匹配。
 
@@ -660,6 +728,70 @@ class ToolStore:
 
         conn = self._ensure_conn()
 
+        if self._vec_available:
+            return await self._vec0_search(conn, query_vec, top_k, min_score, exclude)
+        else:
+            return await self._json_search(conn, query_vec, top_k, min_score, exclude)
+
+    async def _vec0_search(
+        self,
+        conn: sqlite3.Connection,
+        query_vec: list[float],
+        top_k: int,
+        min_score: float,
+        exclude: set[str] | None,
+    ) -> list[ToolSearchResult]:
+        """sqlite-vec vec0 KNN 搜索"""
+        from youmi.mcp.vault import ToolSearchResult
+
+        norm_query = normalize_vector(query_vec)
+        # 多取一些以便 exclude 过滤后仍有足够结果
+        fetch_k = top_k * 3 if exclude else top_k
+
+        def _search():
+            rows = conn.execute(
+                """SELECT t.tool_id, t.tool_name, t.definition_json, t.summary,
+                          v.distance
+                   FROM vec_tools_idx v
+                   JOIN tools t ON t.id = v.rowid
+                   WHERE v.embedding MATCH ?
+                   AND k = ?
+                   ORDER BY v.distance""",
+                (vec_to_json(norm_query), fetch_k),
+            ).fetchall()
+            return rows
+
+        rows = await asyncio.to_thread(_search)
+
+        results: list[ToolSearchResult] = []
+        for tool_id, tool_name, defn_json, summary, distance in rows:
+            if exclude and tool_name in exclude:
+                continue
+
+            score = l2_to_cosine(distance)
+            if score >= min_score:
+                defn = ToolDefinition.model_validate_json(defn_json)
+                results.append(ToolSearchResult(
+                    tool_name=tool_name,
+                    definition=defn,
+                    score=score,
+                    summary=summary or defn.description[:80],
+                ))
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:top_k]
+
+    async def _json_search(
+        self,
+        conn: sqlite3.Connection,
+        query_vec: list[float],
+        top_k: int,
+        min_score: float,
+        exclude: set[str] | None,
+    ) -> list[ToolSearchResult]:
+        """降级: JSON 向量表 + Python 余弦相似度"""
+        from youmi.mcp.vault import ToolSearchResult
+
         def _search():
             rows = conn.execute(
                 """SELECT v.tool_id, v.tool_name, v.embedding_json,
@@ -675,15 +807,12 @@ class ToolStore:
             return []
 
         results: list[ToolSearchResult] = []
-        for row in rows:
-            tool_id, tool_name, emb_json, defn_json, summary = row
-
-            # 排除已否决项
+        for tool_id, tool_name, emb_json, defn_json, summary in rows:
             if exclude and tool_name in exclude:
                 continue
 
             embedding = json.loads(emb_json)
-            score = _cosine_similarity(query_vec, embedding)
+            score = cosine_similarity_python(query_vec, embedding)
             if score >= min_score:
                 defn = ToolDefinition.model_validate_json(defn_json)
                 results.append(ToolSearchResult(
@@ -911,8 +1040,7 @@ class ToolStore:
     # 内部辅助
     # ==================================================================
 
-    @staticmethod
-    def _row_to_entry(row: tuple, conn: sqlite3.Connection) -> ToolEntry | None:
+    def _row_to_entry(self, row: tuple, conn: sqlite3.Connection) -> ToolEntry | None:
         """将数据库行转换为 ToolEntry"""
         from youmi.mcp.vault import ToolEntry, ToolContextTier
 
@@ -929,17 +1057,34 @@ class ToolStore:
             logger.warning("ToolStore: failed to parse definition for '%s'", tool_name)
             return None
 
-        # 读取向量 (如果有)
+        # 读取向量
         embedding: list[float] = []
-        vec_row = conn.execute(
-            "SELECT embedding_json FROM vec_tools WHERE tool_id = ?",
-            (tool_id,),
-        ).fetchone()
-        if vec_row:
-            try:
-                embedding = json.loads(vec_row[0])
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if self._vec_available:
+            # 从 vec0 读取: 通过 tool_id 查找主表 id，再查 vec0
+            id_row = conn.execute(
+                "SELECT id FROM tools WHERE tool_id = ?", (tool_id,),
+            ).fetchone()
+            if id_row:
+                vec_row = conn.execute(
+                    "SELECT vec_to_json(embedding) FROM vec_tools_idx WHERE rowid = ?",
+                    (id_row[0],),
+                ).fetchone()
+                if vec_row:
+                    try:
+                        embedding = json.loads(vec_row[0])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+        else:
+            # 降级: 从 vec_tools JSON 表读取
+            vec_row = conn.execute(
+                "SELECT embedding_json FROM vec_tools WHERE tool_id = ?",
+                (tool_id,),
+            ).fetchone()
+            if vec_row:
+                try:
+                    embedding = json.loads(vec_row[0])
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         entry = ToolEntry(
             tool_name=tool_name,
@@ -968,7 +1113,10 @@ class ToolStore:
         def _stats():
             tools = conn.execute("SELECT COUNT(DISTINCT tool_name) FROM tools").fetchone()[0]
             versions = conn.execute("SELECT COUNT(*) FROM tools").fetchone()[0]
-            vectors = conn.execute("SELECT COUNT(*) FROM vec_tools").fetchone()[0]
+            if self._vec_available:
+                vectors = conn.execute("SELECT COUNT(*) FROM vec_tools_idx").fetchone()[0]
+            else:
+                vectors = conn.execute("SELECT COUNT(*) FROM vec_tools").fetchone()[0]
             changelogs = conn.execute("SELECT COUNT(*) FROM tool_changelogs").fetchone()[0]
             aliases = conn.execute("SELECT COUNT(*) FROM tool_aliases").fetchone()[0]
             tags = conn.execute("SELECT COUNT(DISTINCT tag) FROM tool_tags").fetchone()[0]

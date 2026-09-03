@@ -506,6 +506,68 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
                      'yes' if self._compactor else 'no',
                      'yes' if self._memory.persistence else 'no')
 
+    # -----------------------------------------------------------------------
+    # P1: 渐进式工具暴露 — 轮次推进与回收
+    # -----------------------------------------------------------------------
+
+    def _advance_tool_context(self) -> None:
+        """推进工具上下文轮次，回收闲置 HOT 工具并刷新 WARM 摘要层
+
+        每个 ReAct 迭代开始时调用一次:
+        1. advance_turn(): 轮次计数 +1
+        2. recycle_tools(): 连续 N 轮未使用的非必备 HOT 工具降级为 WARM
+           (N = config.tool_discovery.recycle_after_turns，默认 3)
+        3. _refresh_warm_tools_layer(): WARM 摘要注入 PromptAssembler
+
+        仅在 ToolBridge 挂载了 AgentToolContext 或 ToolVault 时生效；
+        未接入 MCP 的 Agent 完全不受影响。
+        """
+        if self._tool_bridge is None:
+            return
+        if (getattr(self._tool_bridge, "context", None) is None
+                and getattr(self._tool_bridge, "vault", None) is None):
+            return
+
+        self._tool_bridge.advance_turn()
+        idle_threshold = self._config.tool_discovery.recycle_after_turns
+        recycled = self._tool_bridge.recycle_tools(idle_threshold=idle_threshold)
+        if recycled:
+            logger.debug(
+                "Agent '%s': recycled %d idle HOT tool(s) → WARM: %s",
+                self.name, len(recycled), recycled,
+            )
+        self._refresh_warm_tools_layer()
+
+    def _refresh_warm_tools_layer(self) -> None:
+        """将 WARM 工具摘要注入 PromptAssembler (同名层替换)
+
+        回收只移除完整 schema，权限保留。此层让 LLM 知道这些工具
+        仍然可用（一条摘要 + 快速重载路径），避免"降级后工具从
+        Agent 认知中彻底消失"。
+        """
+        if self._prompt_assembler is None or self._tool_bridge is None:
+            return
+
+        summaries = self._tool_bridge.to_warm_summaries()
+        if summaries:
+            lines = [
+                f"- {s.get('name')}: {s.get('summary') or s.get('description', '')}"
+                for s in summaries
+            ]
+            content = (
+                "[温态工具] 以下工具已授权但当前不在直接调用列表中。"
+                '如需使用，调用 search_new_tools 并传 load="<工具名>" 即可重新加载:\n'
+                + "\n".join(lines)
+            )
+            self._prompt_assembler.add_layer(PromptLayer(
+                name="warm_tools",
+                content=content,
+                priority=45,
+                token_budget=512,
+            ))
+        else:
+            self._prompt_assembler.remove_layer("warm_tools")
+
     async def run(self, task: str, task_id: str = "") -> TaskResult:
         """执行任务 — 核心 ReAct 循环
 
@@ -565,6 +627,8 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         try:
             while self._iteration_count < self._config.max_iterations:
                 self._iteration_count += 1
+                # P1: 渐进式暴露 — 推进轮次 + 回收闲置 HOT 工具
+                self._advance_tool_context()
                 logger.debug(
                     "Agent '%s' iteration %d/%d",
                     self.name, self._iteration_count, self._config.max_iterations,
@@ -669,6 +733,7 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         try:
             for i in range(self._config.max_iterations):
                 iterations += 1
+                self._advance_tool_context()
 
                 observation = await self._observe()
                 thought = await self._think(observation)
@@ -749,6 +814,7 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         try:
             for i in range(self._config.max_iterations):
                 iterations += 1
+                self._advance_tool_context()
                 observation = await self._observe()
 
                 # --- 流式 Think ---

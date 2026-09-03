@@ -35,6 +35,17 @@
       ],
       "created_at": 1787796810.4575403,
       "updated_at": 1787796933.6204138
+    },
+    {
+      "session_id": "sess_c5916890b26c",
+      "type": "group",
+      "name": "群聊",
+      "owner_agent_id": "26b7a0d0848a400b",
+      "member_ids": [
+        "26b7a0d0848a400b"
+      ],
+      "created_at": 1788330388.4246068,
+      "updated_at": 1788330426.0779197
     }
   ],
   "cards": {
@@ -634,6 +645,24 @@
     },
     "2c2aa9c8c19a4295": {
       "agent_id": "2c2aa9c8c19a4295",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "53cf5df4e7324e40": {
+      "agent_id": "53cf5df4e7324e40",
+      "name": "MasterAgent",
+      "role": "master",
+      "color": "#2f7cf6",
+      "status": "idle",
+      "bio": "",
+      "task": ""
+    },
+    "26b7a0d0848a400b": {
+      "agent_id": "26b7a0d0848a400b",
       "name": "MasterAgent",
       "role": "master",
       "color": "#2f7cf6",

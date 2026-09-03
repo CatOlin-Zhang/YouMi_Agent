@@ -31,6 +31,7 @@ from youmi.core.types import (
     LLMConfig,
     MemoryConfig,
     RetryPolicy,
+    ToolDiscoveryConfig,
     ToolsConfig,
 )
 
@@ -102,6 +103,12 @@ class AgentConfig(BaseModel):
     tools: ToolsConfig = Field(
         default_factory=ToolsConfig,
         description="工具装配配置：声明 Agent 需要注册哪些工具",
+    )
+
+    # 工具发现与三级上下文 (P1: 渐进式暴露 — HOT/WARM/COLD + 轮次回收)
+    tool_discovery: ToolDiscoveryConfig = Field(
+        default_factory=ToolDiscoveryConfig,
+        description="工具发现配置（渐进式暴露 + 轮次回收，由 ReAct 循环自动推进）",
     )
 
     # Handoff / 任务委派 (P1: OC-4)

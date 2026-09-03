@@ -234,6 +234,12 @@ class MasterAgent(ToolApprovalMixin, Agent):
         优先尝试从 youmi/agents/<role>/config.yaml 加载配置，
         找不到则使用参数构造默认配置。
 
+        LLM 模型分级（同一 Ollama 实例可同时托管多个模型，
+        MasterAgent 用小模型路由，子 Agent 用大模型推理）:
+        1. 子 Agent 自身 config.yaml 的 llm_config（含 api_key 或 base_url 时生效）
+        2. Master 配置 extra.sub_agent_llm_config（子 Agent 默认模型）
+        3. 继承 Master 的 llm_config（共享客户端，与旧版行为一致）
+
         Args:
             role: Agent 角色标识（如 coder / reviewer / researcher）
             name: Agent 实例名称，默认使用 role
@@ -247,6 +253,11 @@ class MasterAgent(ToolApprovalMixin, Agent):
             新创建的 Agent 实例（尚未 initialize）
         """
         agent_name = name or role
+
+        # 子 Agent 默认 LLM 配置（模型分级）
+        sub_llm_default: dict[str, Any] | None = (
+            (self._config.extra or {}).get("sub_agent_llm_config") or None
+        )
 
         # 尝试从配置目录加载
         try:
@@ -267,9 +278,19 @@ class MasterAgent(ToolApprovalMixin, Agent):
             if config_overrides:
                 data.update(config_overrides)
 
+            # LLM 配置解析（模型分级）: 子 Agent 配置了完整可用的 LLM
+            # （与 Master 同标准: api_key 或 base_url）则优先使用，
+            # 否则回退到 extra.sub_agent_llm_config 或 YAML 原值
+            if llm_data.get("api_key") or llm_data.get("base_url"):
+                sub_llm = LLMConfig(**llm_data)
+            elif sub_llm_default:
+                sub_llm = LLMConfig(**sub_llm_default)
+            else:
+                sub_llm = LLMConfig(**llm_data)
+
             sub_config = AgentConfig(
                 name=agent_name,
-                llm_config=LLMConfig(**llm_data),
+                llm_config=sub_llm,
                 memory_config=MemoryConfig(**memory_data),
                 metadata=AgentMetadata(**metadata_data),
                 env=env or self._env,
@@ -292,7 +313,11 @@ class MasterAgent(ToolApprovalMixin, Agent):
             sub_config = AgentConfig(
                 name=agent_name,
                 system_prompt=system_prompt or f"你是一个 {role} 角色的 Agent。",
-                llm_config=self._config.llm_config,
+                llm_config=(
+                    LLMConfig(**sub_llm_default)
+                    if sub_llm_default
+                    else self._config.llm_config
+                ),
                 memory_config=self._config.memory_config,
                 allowed_tools=allowed_tools or [],
                 env=env or self._env,
@@ -312,9 +337,23 @@ class MasterAgent(ToolApprovalMixin, Agent):
 
         agent = Agent(sub_config)
 
-        # 共享 LLM 客户端（如果 MasterAgent 有，且非隔离模式）
-        if self._llm_client is not None and not isolated:
-            agent._llm_client = self._llm_client
+        # 注入 LLM 客户端（非隔离模式，模型分级）:
+        # 配置与 Master 完全相同时共享客户端；不同（如子 Agent 用更大模型）时
+        # 为其创建独立客户端，请求按 model 字段路由到同一 Ollama 的不同模型
+        if not isolated:
+            sub_llm = sub_config.llm_config
+            if sub_llm.api_key or sub_llm.base_url:
+                if self._llm_client is not None and sub_llm == self._config.llm_config:
+                    agent._llm_client = self._llm_client
+                else:
+                    agent._llm_client = LLMClient(sub_llm)
+                    logger.info(
+                        "Sub-agent '%s' uses dedicated LLM client: model=%s",
+                        agent_name, sub_llm.model,
+                    )
+            elif self._llm_client is not None:
+                # 子 Agent 未配置 LLM → 共享 Master 的客户端（向后兼容）
+                agent._llm_client = self._llm_client
 
         # 注册
         record = SubAgentRecord(
@@ -860,7 +899,15 @@ class MasterAgent(ToolApprovalMixin, Agent):
         for record in self._sub_agents.values():
             if record.isolated and record._subprocess_handle:
                 await record._subprocess_handle.terminate()
-            elif record.agent.is_alive:
+                continue
+            # 关闭子 Agent 独享的 LLM 客户端（共享 Master 实例的不在此关闭）
+            client = getattr(record.agent, '_llm_client', None)
+            if client is not None and client is not self._llm_client:
+                try:
+                    await client.close()
+                except Exception:
+                    logger.debug("Failed to close sub-agent LLM client", exc_info=True)
+            if record.agent.is_alive:
                 await record.agent.destroy()
         self._sub_agents.clear()
         logger.info("MasterAgent destroyed all sub-agents.")

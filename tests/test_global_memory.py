@@ -309,7 +309,7 @@ async def test_global_memory_vector_search():
     print("\n=== Test 4: GlobalMemory Vector Search ===")
 
     embedder = MockEmbeddingClient()
-    memory = GlobalMemory(db_path=":memory:", embedding_client=embedder)
+    memory = GlobalMemory(db_path=":memory:", embedding_client=embedder, embedding_dim=32)
     await memory.initialize()
 
     e1 = await memory.add_experience(

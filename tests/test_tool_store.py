@@ -21,6 +21,7 @@ import pytest
 
 from youmi.core.tool import ToolDefinition, ToolParameter, ToolVersion, bump_version
 from youmi.mcp.tool_store import ToolStore, _cosine_similarity
+from youmi._vec_utils import cosine_similarity_python
 
 
 # ===================================================================
@@ -83,7 +84,7 @@ class MockEmbeddingClient:
 @pytest.fixture
 async def store():
     """创建内存模式的 ToolStore"""
-    s = ToolStore(db_path=":memory:")
+    s = ToolStore(db_path=":memory:", embedding_dim=8)
     await s.initialize()
     yield s
     await s.close()
@@ -91,9 +92,28 @@ async def store():
 
 @pytest.fixture
 async def store_with_embedding():
-    """创建带 MockEmbeddingClient 的 ToolStore"""
-    s = ToolStore(db_path=":memory:", embedding_client=MockEmbeddingClient())
+    """创建带 MockEmbeddingClient 的 ToolStore (sqlite-vec vec0 模式)"""
+    s = ToolStore(
+        db_path=":memory:",
+        embedding_client=MockEmbeddingClient(),
+        embedding_dim=8,
+    )
     await s.initialize()
+    yield s
+    await s.close()
+
+
+@pytest.fixture
+async def store_fallback():
+    """创建强制降级模式的 ToolStore (无 sqlite-vec)"""
+    s = ToolStore(
+        db_path=":memory:",
+        embedding_client=MockEmbeddingClient(),
+        embedding_dim=8,
+    )
+    await s.initialize()
+    # 强制关闭 vec0 模式
+    s._vec_available = False
     yield s
     await s.close()
 
@@ -244,13 +264,34 @@ class TestToolStoreCRUD:
         assert result is True  # 删除不存在的不报错
 
     @pytest.mark.asyncio
-    async def test_upsert_with_embedding(self, store):
-        entry = _make_entry("tool_emb", "带向量的工具", embedding=[0.1, 0.2, 0.3])
+    async def test_upsert_with_embedding(self, store_with_embedding):
+        """vec0 模式: 向量归一化后存储，读回为归一化向量"""
+        store = store_with_embedding
+        if not store._vec_available:
+            pytest.skip("sqlite-vec 不可用，跳过 vec0 归一化测试")
+
+        import math
+        raw = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+        entry = _make_entry("tool_emb", "带向量的工具", embedding=raw)
         await store.upsert_tool(entry)
 
         result = await store.get_tool("tool_emb")
         assert result is not None
-        assert result.embedding == [0.1, 0.2, 0.3]
+        assert len(result.embedding) == 8
+        # 归一化后模长应为 ~1.0
+        norm = math.sqrt(sum(x * x for x in result.embedding))
+        assert abs(norm - 1.0) < 1e-5
+
+    @pytest.mark.asyncio
+    async def test_upsert_with_embedding_fallback(self, store_fallback):
+        """降级模式: 向量原样存储在 JSON 列"""
+        raw = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+        entry = _make_entry("tool_emb", "带向量的工具", embedding=raw)
+        await store_fallback.upsert_tool(entry)
+
+        result = await store_fallback.get_tool("tool_emb")
+        assert result is not None
+        assert result.embedding == raw
 
     @pytest.mark.asyncio
     async def test_get_latest_version(self, store):
@@ -442,6 +483,56 @@ class TestToolStoreSearch:
         """无 embedding_client 时 update_embedding 应静默返回"""
         await store.upsert_tool(_make_entry("tool_x", "描述"))
         await store.update_embedding("tool_x")  # 不应报错
+
+    @pytest.mark.asyncio
+    async def test_vec0_search(self, store_with_embedding):
+        """sqlite-vec vec0 KNN 搜索"""
+        store = store_with_embedding
+        if not store._vec_available:
+            pytest.skip("sqlite-vec 不可用，跳过 vec0 搜索测试")
+
+        await store.upsert_tool(_make_entry("send_email", "发送电子邮件到指定地址"))
+        await store.upsert_tool(_make_entry("calc_math", "执行数学计算"))
+        await store.upsert_tool(_make_entry("search_web", "搜索互联网内容"))
+
+        await store.update_embedding("send_email")
+        await store.update_embedding("calc_math")
+        await store.update_embedding("search_web")
+
+        results = await store.search("发送邮件", top_k=3, min_score=0.0)
+        assert len(results) > 0
+        # 分数应为余弦相似度 (0-1 范围)
+        for r in results:
+            assert -1.0 <= r.score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_fallback_vector_search(self, store_fallback):
+        """降级模式: JSON 向量表 + Python 余弦相似度"""
+        store = store_fallback
+        assert not store._vec_available, "测试需要降级模式"
+
+        await store.upsert_tool(_make_entry("send_email", "发送电子邮件到指定地址"))
+        await store.upsert_tool(_make_entry("calc_math", "执行数学计算"))
+
+        await store.update_embedding("send_email")
+        await store.update_embedding("calc_math")
+
+        results = await store.search("发送邮件", top_k=3, min_score=0.0)
+        assert len(results) > 0
+        for r in results:
+            assert -1.0 <= r.score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_vec0_stats(self, store_with_embedding):
+        """vec0 模式下 stats 正确统计向量数"""
+        store = store_with_embedding
+        await store.upsert_tool(_make_entry("tool_a", "工具 A"))
+        await store.upsert_tool(_make_entry("tool_b", "工具 B"))
+        await store.update_embedding("tool_a")
+        await store.update_embedding("tool_b")
+
+        stats = await store.stats()
+        assert stats["vectors"] == 2
 
 
 # ===================================================================

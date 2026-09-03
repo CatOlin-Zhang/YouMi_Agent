@@ -1,13 +1,14 @@
 """
 GlobalMemory — 全局记忆核心
 
-跨任务的工具使用经验知识库，基于 SQLite 持久化 + 向量语义检索。
+跨任务的工具经验知识库，基于 SQLite 持久化 + sqlite-vec 向量语义检索。
 经验专供工具管理 Agent（如 ToolGuardian）诊断和修复工具问题，
 修复完成后通过 mark_resolved() 标记解决并记录修复方案。
 
 数据表:
 - knowledge_entries: 知识条目主表
-- knowledge_vectors: 向量索引 (embedding 序列化为 JSON)
+- vec_knowledge_idx: sqlite-vec vec0 虚拟表 (归一化向量, KNN 查询)
+- knowledge_vectors: 降级用 JSON 向量列 (sqlite-vec 不可用时)
 
 用法::
 
@@ -47,6 +48,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from youmi._vec_utils import (
+    cosine_similarity_python,
+    l2_to_cosine,
+    normalize_vector,
+    try_load_sqlite_vec,
+    vec_to_json,
+)
 from youmi.knowledge.models import (
     KnowledgeCategory,
     KnowledgeEntry,
@@ -58,13 +66,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 向后兼容
+_cosine_similarity = cosine_similarity_python
+
 # ---------------------------------------------------------------------------
 # 建表 SQL
 # ---------------------------------------------------------------------------
 
 _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS knowledge_entries (
-    entry_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id TEXT UNIQUE NOT NULL,
     category TEXT NOT NULL DEFAULT 'tool_experience',
     tool_name TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
@@ -82,6 +94,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_tool ON knowledge_entries(tool_name);
 CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_entries(category);
 CREATE INDEX IF NOT EXISTS idx_knowledge_updated ON knowledge_entries(updated_at DESC);
 
+-- 降级用 JSON 向量表
 CREATE TABLE IF NOT EXISTS knowledge_vectors (
     entry_id TEXT PRIMARY KEY REFERENCES knowledge_entries(entry_id) ON DELETE CASCADE,
     tool_name TEXT NOT NULL DEFAULT '',
@@ -94,26 +107,6 @@ CREATE INDEX IF NOT EXISTS idx_kvec_tool ON knowledge_vectors(tool_name);
 
 
 # ---------------------------------------------------------------------------
-# 辅助: 余弦相似度 (纯 Python, 与 ToolStore 保持一致)
-# ---------------------------------------------------------------------------
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """计算两个向量的余弦相似度"""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-
-    import math
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-
-    return dot / (norm_a * norm_b)
-
-
-# ---------------------------------------------------------------------------
 # GlobalMemory 核心
 # ---------------------------------------------------------------------------
 
@@ -122,7 +115,7 @@ class GlobalMemory:
 
     职责:
     - 持久化 KnowledgeEntry (SQLite)
-    - 向量语义检索 (接入 EmbeddingClient; 未接入时降级为关键词匹配)
+    - 向量语义检索 (sqlite-vec KNN; 未接入时降级为关键词匹配)
     - 聚合单个工具的经验 (ToolKnowledge)
     - 修复闭环 (mark_resolved / 记录 fix_history)
 
@@ -131,23 +124,27 @@ class GlobalMemory:
             ":memory:" 使用内存数据库 (测试用)。
             默认 ".youmi_knowledge.db" (当前工作目录)。
         embedding_client: EmbeddingClient 实例 (None = 关键词检索降级)
+        embedding_dim: Embedding 向量维度 (默认 768)
     """
 
     def __init__(
         self,
         db_path: str = ".youmi_knowledge.db",
         embedding_client: EmbeddingClient | None = None,
+        embedding_dim: int = 768,
     ) -> None:
         self._db_path = db_path
         self._conn: sqlite3.Connection | None = None
         self._embedding_client = embedding_client
+        self._embedding_dim = embedding_dim
+        self._vec_available: bool = False
 
     # ==================================================================
     # 生命周期
     # ==================================================================
 
     async def initialize(self) -> None:
-        """建库建表 (幂等: 已初始化时跳过)"""
+        """建库建表 (幂等: 已初始化时跳过)，并尝试加载 sqlite-vec"""
         if self._conn is not None:
             return
 
@@ -160,7 +157,25 @@ class GlobalMemory:
         await asyncio.to_thread(self._conn.execute, "PRAGMA foreign_keys = ON;")
         await asyncio.to_thread(self._conn.executescript, _CREATE_TABLES_SQL)
         await asyncio.to_thread(self._conn.commit)
-        logger.info("GlobalMemory initialized: %s", self._db_path)
+
+        # 尝试加载 sqlite-vec
+        self._vec_available = await asyncio.to_thread(
+            try_load_sqlite_vec, self._conn,
+        )
+        if self._vec_available:
+            dim = self._embedding_dim
+            vec_sql = (
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_knowledge_idx "
+                f"USING vec0(embedding float[{dim}])"
+            )
+            await asyncio.to_thread(self._conn.execute, vec_sql)
+            await asyncio.to_thread(self._conn.commit)
+            logger.info(
+                "GlobalMemory initialized with sqlite-vec: %s (dim=%d)",
+                self._db_path, dim,
+            )
+        else:
+            logger.info("GlobalMemory initialized (fallback mode): %s", self._db_path)
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -226,6 +241,41 @@ class GlobalMemory:
         await self._insert_entry(entry)
         return entry
 
+    async def add_feedback(
+        self,
+        tool_name: str,
+        feedback: str,
+        rating: str = "positive",
+        source_task_id: str = "",
+        source_agent_id: str = "",
+    ) -> KnowledgeEntry:
+        """记录一条人工反馈 (HUMAN_FEEDBACK)
+
+        人工反馈是工具经验的最高可信度来源:
+        - 正反馈沉淀为该工具的最佳实践
+        - 负反馈作为未解决问题进入 known_issues，
+          累计达到阈值后可触发 ToolGuardian 修复流程
+          (见 youmi.knowledge.feedback.FeedbackCollector)
+
+        Args:
+            tool_name: 关联工具名
+            feedback: 反馈内容 (用户对工具使用的评价/纠正)
+            rating: "positive" | "negative"
+            source_task_id: 来源任务 ID
+            source_agent_id: 来源 Agent ID
+
+        Returns:
+            写入后的 KnowledgeEntry
+        """
+        return await self.add_experience(
+            tool_name=tool_name,
+            content=feedback,
+            category=KnowledgeCategory.HUMAN_FEEDBACK,
+            source_task_id=source_task_id,
+            source_agent_id=source_agent_id,
+            metadata={"rating": rating},
+        )
+
     async def batch_add(self, entries: list[KnowledgeEntry]) -> list[str]:
         """批量写入条目 (已构造好的 KnowledgeEntry 列表)
 
@@ -269,12 +319,20 @@ class GlobalMemory:
         def _write():
             cursor = conn.cursor()
             try:
+                # ON CONFLICT DO UPDATE 保持 id 稳定
                 cursor.execute(
-                    """INSERT OR REPLACE INTO knowledge_entries
+                    """INSERT INTO knowledge_entries
                        (entry_id, category, tool_name, content, source_task_id,
                         source_agent_id, success_rate, resolved, resolution,
                         metadata, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(entry_id) DO UPDATE SET
+                           content = excluded.content,
+                           resolved = excluded.resolved,
+                           resolution = excluded.resolution,
+                           success_rate = excluded.success_rate,
+                           metadata = excluded.metadata,
+                           updated_at = excluded.updated_at""",
                     (
                         entry.entry_id,
                         entry.category.value,
@@ -290,24 +348,57 @@ class GlobalMemory:
                         entry.updated_at.isoformat(),
                     ),
                 )
+
+                # 获取稳定的 id
+                row = cursor.execute(
+                    "SELECT id FROM knowledge_entries WHERE entry_id = ?",
+                    (entry.entry_id,),
+                ).fetchone()
+                row_id = row[0]
+
+                # 写入向量
                 if entry.embedding is not None:
-                    cursor.execute(
-                        """INSERT OR REPLACE INTO knowledge_vectors
-                           (entry_id, tool_name, embedding_json, updated_at)
-                           VALUES (?, ?, ?, ?)""",
-                        (
-                            entry.entry_id,
-                            entry.tool_name,
-                            json.dumps(entry.embedding),
-                            entry.updated_at.isoformat(),
-                        ),
-                    )
+                    self._write_vec(cursor, row_id, entry)
+
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
 
         await asyncio.to_thread(_write)
+
+    def _write_vec(
+        self,
+        cursor: sqlite3.Cursor,
+        row_id: int,
+        entry: KnowledgeEntry,
+    ) -> None:
+        """写入向量到 vec0 (优先) 或 knowledge_vectors (降级)"""
+        now = entry.updated_at.isoformat()
+        if self._vec_available:
+            norm = normalize_vector(entry.embedding)
+            cursor.execute(
+                "DELETE FROM vec_knowledge_idx WHERE rowid = ?", (row_id,),
+            )
+            cursor.execute(
+                "INSERT INTO vec_knowledge_idx(rowid, embedding) VALUES (?, ?)",
+                (row_id, vec_to_json(norm)),
+            )
+        else:
+            cursor.execute(
+                """INSERT INTO knowledge_vectors
+                   (entry_id, tool_name, embedding_json, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(entry_id) DO UPDATE SET
+                       embedding_json = excluded.embedding_json,
+                       updated_at = excluded.updated_at""",
+                (
+                    entry.entry_id,
+                    entry.tool_name,
+                    json.dumps(entry.embedding),
+                    now,
+                ),
+            )
 
     # ==================================================================
     # 修复闭环
@@ -430,7 +521,7 @@ class GlobalMemory:
     ) -> list[KnowledgeEntry]:
         """语义检索知识条目
 
-        接入 EmbeddingClient 时使用向量余弦相似度排序；
+        接入 EmbeddingClient 时使用 sqlite-vec KNN 或 Python 余弦相似度排序；
         未接入时降级为关键词匹配。
 
         Args:
@@ -444,24 +535,19 @@ class GlobalMemory:
         if not query.strip():
             return []
 
-        entries = await self.list_entries(
-            tool_name=tool_name, limit=1000,
-        )
-        if not entries:
-            return []
-
         # 尝试向量检索
         if self._embedding_client is not None:
             try:
                 query_vec = await self._embedding_client.embed_one(query)
-                scored = [
-                    (entry, _cosine_similarity(query_vec, entry.embedding or []))
-                    for entry in entries
-                ]
-                scored.sort(key=lambda x: x[1], reverse=True)
-                results = [e for e, score in scored[:top_k] if score > 0.1]
-                if results:
-                    return results
+
+                if self._vec_available:
+                    results = await self._vec0_search(query_vec, tool_name, top_k)
+                    if results:
+                        return results
+                else:
+                    results = await self._json_search(query_vec, tool_name, top_k)
+                    if results:
+                        return results
                 # 向量召回为空 → 继续尝试关键词
             except Exception as exc:
                 logger.warning(
@@ -469,7 +555,89 @@ class GlobalMemory:
                 )
 
         # 关键词降级检索
+        entries = await self.list_entries(
+            tool_name=tool_name, limit=1000,
+        )
+        if not entries:
+            return []
         return self._keyword_search(entries, query, top_k)
+
+    async def _vec0_search(
+        self,
+        query_vec: list[float],
+        tool_name: str | None,
+        top_k: int,
+    ) -> list[KnowledgeEntry]:
+        """sqlite-vec vec0 KNN 搜索"""
+        conn = self._ensure_conn()
+        norm_query = normalize_vector(query_vec)
+        fetch_k = top_k * 3
+
+        # 构建 SQL: 可选 tool_name 过滤通过 JOIN 实现
+        if tool_name is not None:
+            sql = """SELECT ke.entry_id, ke.category, ke.tool_name, ke.content,
+                            ke.source_task_id, ke.source_agent_id, ke.success_rate,
+                            ke.resolved, ke.resolution, ke.metadata,
+                            ke.created_at, ke.updated_at, v.distance
+                     FROM vec_knowledge_idx v
+                     JOIN knowledge_entries ke ON ke.id = v.rowid
+                     WHERE v.embedding MATCH ? AND k = ?
+                       AND ke.tool_name = ?
+                     ORDER BY v.distance"""
+            params: list[Any] = [vec_to_json(norm_query), fetch_k, tool_name]
+        else:
+            sql = """SELECT ke.entry_id, ke.category, ke.tool_name, ke.content,
+                            ke.source_task_id, ke.source_agent_id, ke.success_rate,
+                            ke.resolved, ke.resolution, ke.metadata,
+                            ke.created_at, ke.updated_at, v.distance
+                     FROM vec_knowledge_idx v
+                     JOIN knowledge_entries ke ON ke.id = v.rowid
+                     WHERE v.embedding MATCH ? AND k = ?
+                     ORDER BY v.distance"""
+            params = [vec_to_json(norm_query), fetch_k]
+
+        def _search():
+            return conn.execute(sql, params).fetchall()
+
+        rows = await asyncio.to_thread(_search)
+        results: list[KnowledgeEntry] = []
+        for row in rows:
+            distance = row[-1]
+            score = l2_to_cosine(distance)
+            if score > 0.1:
+                entry = self._row_to_entry(row[:-1])  # 去掉 distance 列
+                results.append(entry)
+
+        return results[:top_k]
+
+    async def _json_search(
+        self,
+        query_vec: list[float],
+        tool_name: str | None,
+        top_k: int,
+    ) -> list[KnowledgeEntry]:
+        """降级: JSON 向量表 + Python 余弦相似度"""
+        entries = await self.list_entries(tool_name=tool_name, limit=1000)
+        if not entries:
+            return []
+
+        # 加载向量
+        conn = self._ensure_conn()
+
+        def _load_vecs():
+            rows = conn.execute(
+                "SELECT entry_id, embedding_json FROM knowledge_vectors"
+            ).fetchall()
+            return {r[0]: json.loads(r[1]) for r in rows}
+
+        vecs = await asyncio.to_thread(_load_vecs)
+
+        scored = [
+            (entry, cosine_similarity_python(query_vec, vecs.get(entry.entry_id, [])))
+            for entry in entries
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [e for e, score in scored[:top_k] if score > 0.1]
 
     @staticmethod
     def _keyword_search(
@@ -510,6 +678,12 @@ class GlobalMemory:
         for entry in entries:
             knowledge.entry_ids.append(entry.entry_id)
 
+            if entry.category == KnowledgeCategory.HUMAN_FEEDBACK:
+                rating = (entry.metadata or {}).get("rating", "")
+                tag = "正反馈" if rating == "positive" else "负反馈"
+                knowledge.human_feedback.append(f"[{tag}] {entry.content}")
+                continue
+
             if entry.category == KnowledgeCategory.BUG_FIX:
                 knowledge.fix_history.append(entry.content)
                 continue
@@ -547,6 +721,18 @@ class GlobalMemory:
         def _delete():
             cursor = conn.cursor()
             try:
+                # 获取 id 以便删除 vec0 行
+                if self._vec_available:
+                    row = cursor.execute(
+                        "SELECT id FROM knowledge_entries WHERE entry_id = ?",
+                        (entry_id,),
+                    ).fetchone()
+                    if row:
+                        cursor.execute(
+                            "DELETE FROM vec_knowledge_idx WHERE rowid = ?",
+                            (row[0],),
+                        )
+                # 删除降级表
                 cursor.execute(
                     "DELETE FROM knowledge_vectors WHERE entry_id = ?", (entry_id,),
                 )
@@ -575,10 +761,14 @@ class GlobalMemory:
                 "SELECT COUNT(*), SUM(resolved) FROM knowledge_entries",
             )
             total, resolved = cursor.fetchone()
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM knowledge_vectors",
-            )
-            (vec_count,) = cursor.fetchone()
+            if self._vec_available:
+                (vec_count,) = conn.execute(
+                    "SELECT COUNT(*) FROM vec_knowledge_idx",
+                ).fetchone()
+            else:
+                (vec_count,) = conn.execute(
+                    "SELECT COUNT(*) FROM knowledge_vectors",
+                ).fetchone()
             cursor = conn.execute(
                 "SELECT tool_name, COUNT(*) FROM knowledge_entries "
                 "WHERE tool_name != '' GROUP BY tool_name "

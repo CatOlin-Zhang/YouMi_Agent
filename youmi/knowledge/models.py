@@ -26,6 +26,7 @@ class KnowledgeCategory(str, Enum):
     TOOL_EXPERIENCE = "tool_experience"   # 工具使用经验 (成功模式 / 失败原因)
     TASK_PATTERN = "task_pattern"         # 任务执行模式
     BUG_FIX = "bug_fix"                   # 修复记录
+    HUMAN_FEEDBACK = "human_feedback"     # 人工反馈 (用户对工具使用的评价)
 
 
 class KnowledgeEntry(BaseModel):
@@ -79,6 +80,7 @@ class ToolKnowledge(BaseModel):
         known_issues: 已知问题与边界条件 (未解决的)
         resolved_issues: 已修复的问题及其修复方案
         fix_history: 修复历史记录
+        human_feedback: 人工反馈列表 (带正/负标记)
         entry_ids: 关联的 KnowledgeEntry ID 列表
     """
 
@@ -87,6 +89,7 @@ class ToolKnowledge(BaseModel):
     known_issues: list[str] = Field(default_factory=list)
     resolved_issues: list[str] = Field(default_factory=list)
     fix_history: list[str] = Field(default_factory=list)
+    human_feedback: list[str] = Field(default_factory=list)
     entry_ids: list[str] = Field(default_factory=list)
 
     @property
@@ -95,6 +98,7 @@ class ToolKnowledge(BaseModel):
         return not (
             self.best_practices or self.known_issues
             or self.resolved_issues or self.fix_history
+            or self.human_feedback
         )
 
 

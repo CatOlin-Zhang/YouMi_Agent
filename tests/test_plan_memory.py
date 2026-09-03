@@ -108,6 +108,7 @@ async def test_save_and_search_vector():
     mem = await _init_memory(
         embedding_client=embedding_client,
         similarity_threshold=0.5,
+        embedding_dim=3,
     )
 
     plan_a = _make_plan(name="A", task="任务A")
@@ -150,6 +151,7 @@ async def test_similarity_threshold():
     mem = await _init_memory(
         embedding_client=embedding_client,
         similarity_threshold=0.8,  # 高阈值
+        embedding_dim=3,
     )
 
     plan = _make_plan()

@@ -1,0 +1,50 @@
+[
+  {
+    "msg_id": "u_9b3ccc25cc6c",
+    "session_id": "sess_c5916890b26c",
+    "agent_id": "__user__",
+    "agent_name": "我",
+    "role": "user",
+    "kind": "text",
+    "text": "我正在做一个兼容米家的指令系统，帮我规划一下",
+    "ts": 1788330408.6530342,
+    "meta": {}
+  },
+  {
+    "msg_id": "m_3f9aeff7b0d9",
+    "session_id": "sess_c5916890b26c",
+    "agent_id": "26b7a0d0848a400b",
+    "agent_name": "MasterAgent",
+    "role": "assistant",
+    "kind": "text",
+    "text": "明白了，请告诉我您希望创建的子 Agent 的角色名称。",
+    "ts": 1788330408.654593,
+    "meta": {
+      "tool_calls": []
+    }
+  },
+  {
+    "msg_id": "u_359d19e04b76",
+    "session_id": "sess_c5916890b26c",
+    "agent_id": "__user__",
+    "agent_name": "我",
+    "role": "user",
+    "kind": "text",
+    "text": "mi",
+    "ts": 1788330425.7225351,
+    "meta": {}
+  },
+  {
+    "msg_id": "m_bdfa5c907e58",
+    "session_id": "sess_c5916890b26c",
+    "agent_id": "26b7a0d0848a400b",
+    "agent_name": "MasterAgent",
+    "role": "assistant",
+    "kind": "text",
+    "text": "好的，我将为您创建一个名为 \"mi\" 的子 Agent。请注意，您将需要先调用 `list_available_roles` 来获取可用的角色名称。好的，我将使用工具来规划您的任务。请稍等片刻。",
+    "ts": 1788330425.7240834,
+    "meta": {
+      "tool_calls": []
+    }
+  }
+]
