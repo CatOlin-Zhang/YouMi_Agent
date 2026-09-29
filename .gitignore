@@ -13,3 +13,11 @@ htmlcov/
 # 虚拟环境
 .venv/
 venv/
+
+# IDE
+.idea/
+
+# 运行时产物（本地数据库 / GUI 会话数据 / 误生成的空文件）
+.youmi_tools.db
+gui/data/
+/PATH
