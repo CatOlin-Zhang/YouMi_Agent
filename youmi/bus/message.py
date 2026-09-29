@@ -65,6 +65,7 @@ class WorkflowMessage(BaseModel):
     - workflow_id: 工作流标识，Broker 据此隔离消息通道
     - msg_type: 消息类型，决定路由策略和记忆写入行为
     - ack_id: 确认标识，用于 at-least-once 投递语义
+    - tenant: 租户标识，Broker 据此阻断跨租户投递
     """
 
     message_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -74,6 +75,7 @@ class WorkflowMessage(BaseModel):
     msg_type: WorkflowMessageType = WorkflowMessageType.STATUS
     role: MessageRole = MessageRole.AGENT
     content: str = ""
+    tenant: str = Field(default="default", description="租户标识（多租户隔离）")
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     ack_id: str = Field(default="", description="ACK 标识，空字符串表示不需要确认")
@@ -151,12 +153,21 @@ class BusEnvelope(BaseModel):
         )
 
     @classmethod
-    def subscribe(cls, agent_id: str, workflow_id: str = "") -> BusEnvelope:
-        """构造订阅信封"""
+    def subscribe(cls, agent_id: str, workflow_id: str = "", token: str = "") -> BusEnvelope:
+        """构造订阅信封
+
+        Args:
+            agent_id: Agent ID
+            workflow_id: 要订阅的工作流 ID
+            token: 认证 token（服务端启用认证时必填；未配置认证时忽略）
+        """
+        payload: dict[str, Any] = {"workflow_id": workflow_id}
+        if token:
+            payload["token"] = token
         return cls(
             envelope_type="subscribe",
             agent_id=agent_id,
-            payload={"workflow_id": workflow_id},
+            payload=payload,
         )
 
     @classmethod

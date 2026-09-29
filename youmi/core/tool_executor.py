@@ -3,7 +3,8 @@
 
 从 youmi/core/agent.py 提取，包含 Agent 工具执行相关方法：
 - _execute_tool_call   — 工具调用入口（含钩子集成）
-- _do_execute_tool     — 实际工具执行（MCP / ToolRegistry 双路径）
+- _do_execute_tool     — 工具执行治理层（M1: 熔断 / 超时 / 追踪 / 审计）
+- _dispatch_tool       — 实际工具执行（MCP / ToolRegistry 双路径）
 - _auto_report_tool_error — 工具错误自动汇报
 - _execute_skill_call  — 技能调用（占位，由 SkillLoader 注入）
 - _execute_delegation  — Agent 间任务委派 (P1: Handoff)
@@ -15,13 +16,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 import traceback as _traceback_mod
 from typing import Any, TYPE_CHECKING
 
 from youmi.core.models import _ActionResult
+from youmi.core.resilience import (
+    CircuitOpenError,
+    get_breaker_registry,
+    get_tool_timeout_s,
+)
 from youmi.core.types import MessageRole
+from youmi.observability import get_audit_logger, set_span_attributes, span
 
 if TYPE_CHECKING:
     from youmi.core.hooks import HookContext, HookDecisionType, HookType
@@ -111,7 +120,122 @@ class ToolExecutionMixin:
     async def _do_execute_tool(
         self, name: str, arguments: dict[str, Any], tool_call_id: str,
     ) -> _ActionResult:
-        """实际工具执行逻辑（从 _execute_tool_call 拆分，方便钩子包装）"""
+        """工具执行治理层（M1: 熔断 / 超时 / 追踪 / 审计）
+
+        治理职责:
+        - 熔断保护: 按 ``tool:<name>`` 隔离，连续失败达阈值后快速失败
+          （以失败结果返回，不打断 ReAct 循环）
+        - 超时兜底: ``YOUMI_TOOL_TIMEOUT_S``（默认 180s），
+          工具自身超时参数更小时以更小者为准
+        - 可观测性: ``tool.call`` span + ``tool_call`` 审计事件
+
+        实际执行委托给 ``_dispatch_tool``（MCP / ToolRegistry 双路径）。
+        """
+        breaker = get_breaker_registry().get(f"tool:{name}")
+        timeout_s = get_tool_timeout_s()
+        audit = get_audit_logger()
+        start = time.monotonic()
+
+        with span("tool.call", attributes={
+            "tool.name": name,
+            "youmi.agent_id": self.agent_id,
+        }) as sp:
+            # 熔断检查 — 拒绝时快速失败，以失败结果返回
+            try:
+                breaker.before_call()
+            except CircuitOpenError as exc:
+                duration_ms = (time.monotonic() - start) * 1000.0
+                set_span_attributes(sp, {
+                    "youmi.success": False,
+                    "youmi.circuit_rejected": True,
+                    "youmi.duration_ms": round(duration_ms, 2),
+                })
+                self._audit_tool_call(
+                    audit, name, arguments,
+                    success=False, duration_ms=duration_ms, error=str(exc),
+                )
+                self._conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({"error": str(exc)}, ensure_ascii=False),
+                })
+                return _ActionResult(success=False, error=str(exc))
+
+            try:
+                action = await asyncio.wait_for(
+                    self._dispatch_tool(name, arguments, tool_call_id),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                # 超时 — 补写 conversation 并自动汇报
+                error_msg = f"工具 '{name}' 执行超时（>{timeout_s:.0f}s）"
+                logger.warning(error_msg)
+                action = _ActionResult(success=False, error=error_msg)
+                self._conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({"error": error_msg}, ensure_ascii=False),
+                })
+                await self._auto_report_tool_error(name, error_msg, arguments)
+            except Exception as exc:
+                # 意外异常 — 记录后保持原有传播语义
+                breaker.record_failure()
+                duration_ms = (time.monotonic() - start) * 1000.0
+                set_span_attributes(sp, {
+                    "youmi.success": False,
+                    "youmi.duration_ms": round(duration_ms, 2),
+                })
+                self._audit_tool_call(
+                    audit, name, arguments,
+                    success=False, duration_ms=duration_ms,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+
+            # 成功 / 业务失败 — 统一计数与审计
+            if action.success:
+                breaker.record_success()
+            else:
+                breaker.record_failure()
+            duration_ms = (time.monotonic() - start) * 1000.0
+            set_span_attributes(sp, {
+                "youmi.success": action.success,
+                "youmi.duration_ms": round(duration_ms, 2),
+            })
+            self._audit_tool_call(
+                audit, name, arguments,
+                success=action.success, duration_ms=duration_ms,
+                error=action.error or "",
+            )
+            return action
+
+    def _audit_tool_call(
+        self,
+        audit: Any,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        success: bool,
+        duration_ms: float,
+        error: str = "",
+    ) -> None:
+        """写入工具调用审计（失败仅告警，不影响主流程）"""
+        try:
+            audit.log_tool_call(
+                tool_name,
+                agent_id=self.agent_id,
+                success=success,
+                duration_ms=round(duration_ms, 2),
+                arguments=arguments or {},
+                error=error[:500],
+            )
+        except Exception as exc:
+            logger.debug("工具审计写入失败: %s", exc)
+
+    async def _dispatch_tool(
+        self, name: str, arguments: dict[str, Any], tool_call_id: str,
+    ) -> _ActionResult:
+        """工具实际执行（MCP / ToolRegistry 双路径，从 _execute_tool_call 拆分）"""
         result_str: str = ""
 
         if self._tool_bridge is not None:

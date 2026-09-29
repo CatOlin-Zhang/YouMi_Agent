@@ -32,6 +32,33 @@ class LLMProvider(str, Enum):
     CUSTOM = "custom"        # 自定义兼容接口
 
 
+# ---------------------------------------------------------------------------
+# 重试策略 (M1: 可靠性 — LLM 重试退避)
+# ---------------------------------------------------------------------------
+
+class BackoffStrategy(str, Enum):
+    """退避策略"""
+
+    FIXED = "fixed"            # 固定间隔
+    LINEAR = "linear"          # 线性递增
+    EXPONENTIAL = "exponential"  # 指数递增
+
+
+class RetryPolicy(BaseModel):
+    """重试策略配置"""
+
+    max_retries: int = Field(default=3, ge=0)
+    base_delay_s: float = Field(default=1.0, ge=0.0, description="基础等待时间(秒)")
+    max_delay_s: float = Field(default=60.0, ge=0.0, description="最大等待时间(秒)")
+    backoff: BackoffStrategy = BackoffStrategy.EXPONENTIAL
+    retryable_exceptions: list[str] = Field(
+        default_factory=lambda: ["TimeoutError", "ConnectionError"],
+        description="可重试的异常类名列表（按异常类 MRO 名称匹配）",
+    )
+
+    model_config = {"frozen": True}
+
+
 class LLMConfig(BaseModel):
     """LLM 连接与推理参数配置
 
@@ -56,6 +83,12 @@ class LLMConfig(BaseModel):
         default=8000, gt=0,
         description="上下文 token 预算。Compactor 据此决定何时触发压缩。"
                     "设为模型实际 context window 的 80% 较安全。",
+    )
+
+    # 重试策略 (M1: 可靠性)。None 时使用 RetryPolicy() 默认值。
+    retry_policy: RetryPolicy | None = Field(
+        default=None,
+        description="LLM 调用重试策略（指数退避），None 使用默认策略",
     )
 
     model_config = {"frozen": True}
@@ -190,33 +223,6 @@ class MemoryConfig(BaseModel):
     # 后端模式 (旧版兼容)
     short_term: ShortTermMemoryConfig = Field(default_factory=ShortTermMemoryConfig)
     long_term: LongTermMemoryConfig = Field(default_factory=LongTermMemoryConfig)
-
-    model_config = {"frozen": True}
-
-
-# ---------------------------------------------------------------------------
-# 重试策略
-# ---------------------------------------------------------------------------
-
-class BackoffStrategy(str, Enum):
-    """退避策略"""
-
-    FIXED = "fixed"            # 固定间隔
-    LINEAR = "linear"          # 线性递增
-    EXPONENTIAL = "exponential"  # 指数递增
-
-
-class RetryPolicy(BaseModel):
-    """重试策略配置"""
-
-    max_retries: int = Field(default=3, ge=0)
-    base_delay_s: float = Field(default=1.0, ge=0.0, description="基础等待时间(秒)")
-    max_delay_s: float = Field(default=60.0, ge=0.0, description="最大等待时间(秒)")
-    backoff: BackoffStrategy = BackoffStrategy.EXPONENTIAL
-    retryable_exceptions: list[str] = Field(
-        default_factory=lambda: ["TimeoutError", "ConnectionError"],
-        description="可重试的异常类名列表",
-    )
 
     model_config = {"frozen": True}
 

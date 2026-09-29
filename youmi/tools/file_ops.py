@@ -8,7 +8,8 @@
 - list_directory: 列出目录内容
 - text_search: 在文件中搜索文本模式（类 grep）
 
-所有操作限定在沙箱目录（work_dir）内，防止越权访问。
+所有操作限定在沙箱目录（work_dir）内，防止越权访问；
+若配置了 SandboxPolicy.allowed_roots 则叠加根目录约束（M1）。
 每次操作记录审计日志。
 """
 
@@ -20,6 +21,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+
+from youmi.security import get_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,9 @@ def _resolve_safe_path(path: str, work_dir: str) -> Path:
         raise PermissionError(
             f"路径 '{path}' 超出沙箱目录 '{work_dir}'，操作被拒绝"
         )
+
+    # M1: 策略式沙箱 — allowed_roots 根目录约束（未配置时放行）
+    get_sandbox().check_path(resolved)
 
     return resolved
 

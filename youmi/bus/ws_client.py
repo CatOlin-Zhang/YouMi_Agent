@@ -28,6 +28,10 @@ from youmi.bus.message import BusEnvelope, WorkflowMessage, WorkflowMessageType
 logger = logging.getLogger(__name__)
 
 
+class SubscribeRejectedError(ConnectionError):
+    """服务端拒绝订阅（如认证失败）— 属于硬拒绝，重试无意义"""
+
+
 class BusClient(MessageBroker):
     """WebSocket 消息总线客户端
 
@@ -41,6 +45,10 @@ class BusClient(MessageBroker):
         await client.publish(msg)
         response = await client.wait_for_message("agent-1", timeout=10.0)
         await client.disconnect()
+
+    服务端启用认证时需提供 token::
+
+        client = BusClient(agent_id="agent-1", url="ws://localhost:8765", token="<secret>")
     """
 
     def __init__(
@@ -50,12 +58,14 @@ class BusClient(MessageBroker):
         reconnect_interval: float = 3.0,
         max_reconnect_attempts: int = 5,
         heartbeat_interval: float = 15.0,
+        token: str = "",
     ) -> None:
         self._agent_id = agent_id
         self._url = url
         self._reconnect_interval = reconnect_interval
         self._max_reconnect_attempts = max_reconnect_attempts
         self._heartbeat_interval = heartbeat_interval
+        self._token = token
 
         self._ws: ClientConnection | None = None
         self._connected = False
@@ -89,7 +99,7 @@ class BusClient(MessageBroker):
                 self._connected = True
 
                 # 发送订阅信封
-                envelope = BusEnvelope.subscribe(self._agent_id, workflow_id)
+                envelope = BusEnvelope.subscribe(self._agent_id, workflow_id, self._token)
                 await self._ws.send(envelope.model_dump_json())
 
                 # 等待订阅确认
@@ -100,6 +110,15 @@ class BusClient(MessageBroker):
                         "BusClient '%s' connected to %s (workflow=%s)",
                         self._agent_id, self._url, workflow_id or "*",
                     )
+                elif resp.get("envelope_type") == "error":
+                    # 服务端硬拒绝（如认证失败）— 不重试，直接失败
+                    reason = (resp.get("payload") or {}).get("error", "unknown error")
+                    await self._ws.close()
+                    self._ws = None
+                    self._connected = False
+                    raise SubscribeRejectedError(
+                        f"Subscribe rejected by {self._url}: {reason}"
+                    )
                 else:
                     logger.warning("Unexpected subscribe response: %s", resp)
 
@@ -108,6 +127,9 @@ class BusClient(MessageBroker):
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 return
 
+            except SubscribeRejectedError:
+                # 认证失败等硬拒绝：token 不变，重试无意义
+                raise
             except Exception as e:
                 logger.warning(
                     "Connection attempt %d/%d failed: %s",
@@ -154,11 +176,7 @@ class BusClient(MessageBroker):
         """追加订阅工作流"""
         if not self.is_connected:
             raise ConnectionError("Not connected to BusServer")
-        envelope = BusEnvelope(
-            envelope_type="subscribe",
-            agent_id=self._agent_id,
-            payload={"workflow_id": workflow_id},
-        )
+        envelope = BusEnvelope.subscribe(self._agent_id, workflow_id, self._token)
         await self._ws.send(envelope.model_dump_json())
 
     async def unsubscribe(self, agent_id: str) -> None:
@@ -272,7 +290,7 @@ class BusClient(MessageBroker):
                 self._connected = True
 
                 # 重新订阅
-                envelope = BusEnvelope.subscribe(self._agent_id, self._workflow_id)
+                envelope = BusEnvelope.subscribe(self._agent_id, self._workflow_id, self._token)
                 await self._ws.send(envelope.model_dump_json())
 
                 # 等待确认
@@ -283,6 +301,14 @@ class BusClient(MessageBroker):
                     # 重新启动接收循环
                     self._recv_task = asyncio.create_task(self._recv_loop())
                     return
+                if resp.get("envelope_type") == "error":
+                    # 认证失败等硬拒绝：重试无意义，停止重连
+                    logger.error(
+                        "BusClient '%s' reconnect rejected by server: %s",
+                        self._agent_id, (resp.get("payload") or {}).get("error", ""),
+                    )
+                    self._connected = False
+                    break
             except Exception as e:
                 logger.warning(
                     "Reconnect attempt %d/%d failed: %s",

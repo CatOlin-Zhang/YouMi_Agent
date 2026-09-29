@@ -4,38 +4,24 @@ Shell 操作工具
 提供沙箱化的命令执行能力:
 - shell_exec: 在限定目录内执行 shell 命令
 
-安全策略:
+安全策略 (M1: 策略式沙箱):
 - 命令在 work_dir 内执行（cwd 设定为沙箱目录）
-- 禁止危险命令（rm -rf /、format、del 等）
-- 超时控制（默认 30 秒）
+- 命令经 youmi.security 沙箱检查: 内置危险命令黑名单（始终生效）
+  + 可选白名单 / 网络限制 / 自定义拒绝规则（YOUMI_SANDBOX_* 配置）
+- 子进程环境变量自动清理（剥离 API key / token 等敏感项，防凭据泄漏）
+- 超时控制（默认 30 秒，受沙箱上限约束）
 - 输出截断（防止超长输出）
-- 审计日志
+- 审计日志（由工具执行治理层记录）
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from typing import Any
+
+from youmi.security import get_sandbox
 
 logger = logging.getLogger(__name__)
-
-# 危险命令模式（跨平台）
-_DANGEROUS_PATTERNS = [
-    r"rm\s+-rf\s+/",             # Linux/macOS: 删除根目录
-    r"rm\s+-rf\s+~",             # 删除 home
-    r"format\s+[a-zA-Z]:",       # Windows: 格式化磁盘
-    r"del\s+/[sS]\s+/[qQ]\s+",  # Windows: 强制递归删除
-    r"mkfs\.",                    # 格式化文件系统
-    r"dd\s+if=.*of=/dev/",      # 直接写磁盘设备
-    r":\(\)\s*\{",               # fork bomb
-    r"shutdown",                  # 关机
-    r"reboot",                    # 重启
-    r"init\s+0",                 # 关机
-]
-
-_DANGEROUS_RE = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_PATTERNS]
 
 # 输出最大字符数
 _MAX_OUTPUT_CHARS = 10_000
@@ -49,19 +35,27 @@ async def shell_exec(
 ) -> str:
     """在沙箱目录内执行 shell 命令。
 
+    M1 增强: 命令经策略式沙箱检查（黑名单/白名单/网络限制），
+    子进程环境变量自动清理，超时与输出受策略上限约束。
+
     Args:
         command: 要执行的 shell 命令
         work_dir: 命令执行目录（沙箱），命令的 cwd 被限制在此目录内
         timeout: 超时秒数，默认 30
         max_output: 最大输出字符数，默认 10000
     """
-    # 安全检查
-    for pat in _DANGEROUS_RE:
-        if pat.search(command):
-            logger.warning("shell_exec BLOCKED dangerous command: %s", command[:100])
-            return f"错误: 命令被安全策略拦截 - 包含危险操作"
+    # M1: 策略式沙箱检查（内置危险命令黑名单始终生效）
+    sandbox = get_sandbox()
+    violation = sandbox.evaluate_command(command)
+    if violation:
+        logger.warning("shell_exec BLOCKED: %s | command=%s", violation, command[:100])
+        return f"错误: 命令被安全策略拦截 - {violation}"
 
-    logger.info("shell_exec: command=%s dir=%s timeout=%d", command[:100], work_dir, timeout)
+    timeout = sandbox.clamp_timeout(timeout)
+    max_output = sandbox.clamp_output(max_output)
+    env = sandbox.build_env()
+
+    logger.info("shell_exec: command=%s dir=%s timeout=%s", command[:100], work_dir, timeout)
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -69,6 +63,7 @@ async def shell_exec(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
+            env=env,
         )
 
         try:

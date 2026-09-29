@@ -41,12 +41,15 @@ class MessageBroker(ABC):
     """
 
     @abstractmethod
-    async def subscribe(self, agent_id: str, workflow_id: str = "") -> None:
+    async def subscribe(
+        self, agent_id: str, workflow_id: str = "", tenant: str = "default",
+    ) -> None:
         """注册 Agent 订阅
 
         Args:
             agent_id: Agent 唯一标识
             workflow_id: 订阅的工作流 ID，空字符串表示订阅所有
+            tenant: 租户标识（多租户隔离，跨租户消息将被阻断）
         """
         ...
 
@@ -125,6 +128,8 @@ class InProcessBroker(MessageBroker):
         self._subscriptions: dict[str, set[str]] = {}
         # workflow_id → agent_id 集合
         self._workflow_members: dict[str, set[str]] = {}
+        # agent_id → 租户标识 (多租户隔离)
+        self._agent_tenants: dict[str, str] = {}
         # message_id → 待确认消息（ACK 追踪）
         self._pending_acks: dict[str, WorkflowMessage] = {}
         # agent_id → 回调列表
@@ -133,7 +138,9 @@ class InProcessBroker(MessageBroker):
         self._workflow_counter: int = 0
         self._lock = asyncio.Lock()
 
-    async def subscribe(self, agent_id: str, workflow_id: str = "") -> None:
+    async def subscribe(
+        self, agent_id: str, workflow_id: str = "", tenant: str = "default",
+    ) -> None:
         """注册 Agent 订阅"""
         async with self._lock:
             if agent_id not in self._queues:
@@ -141,13 +148,18 @@ class InProcessBroker(MessageBroker):
             if agent_id not in self._subscriptions:
                 self._subscriptions[agent_id] = set()
 
+            self._agent_tenants[agent_id] = tenant or "default"
+
             if workflow_id:
                 self._subscriptions[agent_id].add(workflow_id)
                 if workflow_id not in self._workflow_members:
                     self._workflow_members[workflow_id] = set()
                 self._workflow_members[workflow_id].add(agent_id)
 
-            logger.debug("Agent '%s' subscribed (workflow=%s)", agent_id, workflow_id or "*")
+            logger.debug(
+                "Agent '%s' subscribed (workflow=%s, tenant=%s)",
+                agent_id, workflow_id or "*", tenant or "default",
+            )
 
     async def unsubscribe(self, agent_id: str) -> None:
         """取消 Agent 订阅"""
@@ -162,6 +174,7 @@ class InProcessBroker(MessageBroker):
             self._subscriptions.pop(agent_id, None)
             self._queues.pop(agent_id, None)
             self._callbacks.pop(agent_id, None)
+            self._agent_tenants.pop(agent_id, None)
             logger.debug("Agent '%s' unsubscribed", agent_id)
 
     async def publish(self, message: WorkflowMessage) -> None:
@@ -251,6 +264,7 @@ class InProcessBroker(MessageBroker):
             self._queues.clear()
             self._subscriptions.clear()
             self._workflow_members.clear()
+            self._agent_tenants.clear()
             self._pending_acks.clear()
             self._callbacks.clear()
             logger.info("InProcessBroker closed")
@@ -283,15 +297,28 @@ class InProcessBroker(MessageBroker):
     # -----------------------------------------------------------------------
 
     def _resolve_targets(self, message: WorkflowMessage) -> list[str]:
-        """解析消息的目标 Agent 列表"""
+        """解析消息的目标 Agent 列表 (自动阻断跨租户投递)"""
         if message.is_broadcast:
             # 广播：同 workflow 的所有 Agent（排除发送者）
             if message.workflow_id:
                 members = self._workflow_members.get(message.workflow_id, set())
-                return [aid for aid in members if aid != message.from_agent_id]
+                candidates = [aid for aid in members if aid != message.from_agent_id]
             else:
                 # 无 workflow_id 的广播：所有已订阅的 Agent（排除发送者）
-                return [aid for aid in self._queues if aid != message.from_agent_id]
+                candidates = [aid for aid in self._queues if aid != message.from_agent_id]
         else:
             # 点对点
-            return [message.to_agent_id] if message.to_agent_id else []
+            candidates = [message.to_agent_id] if message.to_agent_id else []
+
+        # 租户隔离: 仅投递给同租户的 Agent
+        allowed = [
+            aid for aid in candidates
+            if self._agent_tenants.get(aid, "default") == message.tenant
+        ]
+        blocked = [aid for aid in candidates if aid not in allowed]
+        if blocked:
+            logger.warning(
+                "Cross-tenant message blocked: %s → %s (tenant=%s)",
+                message.from_agent_id, blocked, message.tenant,
+            )
+        return allowed

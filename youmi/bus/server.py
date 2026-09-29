@@ -24,6 +24,8 @@ from websockets.asyncio.server import Server as WsServer, ServerConnection
 
 from youmi.bus.broker import InProcessBroker, MessageBroker
 from youmi.bus.message import BusEnvelope, WorkflowMessage
+from youmi.observability import get_audit_logger
+from youmi.security import get_auth_manager
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,8 @@ class BusServer:
         self._connections: dict[str, ServerConnection] = {}
         # agent_id → last heartbeat timestamp
         self._heartbeats: dict[str, float] = {}
+        # agent_id → 租户标识 (认证主体派生, 用于强制消息归属)
+        self._agent_tenants: dict[str, str] = {}
         self._running = False
 
     @property
@@ -82,6 +86,12 @@ class BusServer:
             port,
             **kwargs,
         )
+        auth = get_auth_manager()
+        if auth.enabled:
+            logger.info(
+                "BusServer auth enabled (%d token(s)) — subscriptions require valid token",
+                auth.token_count,
+            )
         logger.info("BusServer started on ws://%s:%d", host, port)
 
     async def stop(self) -> None:
@@ -126,6 +136,7 @@ class BusServer:
     async def _handle_connection(self, websocket: ServerConnection) -> None:
         """处理新的 WebSocket 连接"""
         agent_id: str | None = None
+        push_task: asyncio.Task | None = None
 
         try:
             async for raw_message in websocket:
@@ -148,13 +159,56 @@ class BusServer:
                         }))
                         continue
 
+                    # 认证校验（未配置 token 时零摩擦放行 → 匿名 admin 主体）
+                    principal = get_auth_manager().validate(envelope.payload.get("token", ""))
+                    if principal is None:
+                        logger.warning(
+                            "Unauthorized subscribe attempt from %s (agent=%s)",
+                            websocket.remote_address, envelope.agent_id,
+                        )
+                        get_audit_logger().log(
+                            "auth",
+                            agent_id=envelope.agent_id,
+                            status="denied",
+                            detail={
+                                "remote": str(websocket.remote_address),
+                                "workflow_id": envelope.payload.get("workflow_id", ""),
+                            },
+                            error="Invalid or missing token",
+                        )
+                        await websocket.send(json.dumps({
+                            "envelope_type": "error",
+                            "payload": {
+                                "error": "Unauthorized: invalid or missing token",
+                                "code": 4401,
+                            },
+                        }))
+                        await websocket.close(code=4401, reason="Unauthorized")
+                        return
+
+                    # 认证成功审计（不记录原始 token，仅指纹）
+                    get_audit_logger().log(
+                        "auth",
+                        agent_id=envelope.agent_id,
+                        tenant=principal.tenant,
+                        status="ok",
+                        detail={
+                            "role": principal.role.value,
+                            "name": principal.name,
+                            "fingerprint": principal.token_fingerprint,
+                        },
+                    )
+
                     agent_id = envelope.agent_id
                     workflow_id = envelope.payload.get("workflow_id", "")
 
-                    # 注册到 Broker
-                    await self._broker.subscribe(agent_id, workflow_id)
+                    # 注册到 Broker (租户随认证主体传播)
+                    await self._broker.subscribe(
+                        agent_id, workflow_id, tenant=principal.tenant,
+                    )
                     self._connections[agent_id] = websocket
                     self._heartbeats[agent_id] = asyncio.get_event_loop().time()
+                    self._agent_tenants[agent_id] = principal.tenant
 
                     # 启动监听 Broker → WebSocket 推送的任务
                     push_task = asyncio.create_task(
@@ -179,7 +233,8 @@ class BusServer:
             logger.exception("Error handling connection for agent '%s'", agent_id)
         finally:
             if agent_id:
-                push_task.cancel()
+                if push_task is not None:
+                    push_task.cancel()
                 await self._cleanup_agent(agent_id)
 
     async def _handle_envelope(
@@ -195,6 +250,8 @@ class BusServer:
             # 解包并发布到 Broker
             msg = envelope.unwrap_message()
             if msg:
+                # 强制归属发布者认证租户 (防止客户端伪造跨租户消息)
+                msg.tenant = self._agent_tenants.get(agent_id, "default")
                 await self._broker.publish(msg)
 
         elif envelope.envelope_type == "ack":
@@ -247,5 +304,6 @@ class BusServer:
         """清理断开的 Agent 连接"""
         self._connections.pop(agent_id, None)
         self._heartbeats.pop(agent_id, None)
+        self._agent_tenants.pop(agent_id, None)
         await self._broker.unsubscribe(agent_id)
         logger.info("Cleaned up agent: %s", agent_id)
