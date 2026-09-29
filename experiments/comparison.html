@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>YouMi Agent × 前沿论文对比</title>
+<style>
+  :root {
+    --bg: #ffffff; --card: #f7f8fa; --border: #e5e7eb;
+    --text: #1a1d21; --muted: #6b7280; --ours: #e11d48;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 24px; margin-bottom: 24px;
+  }
+  .card h2 { font-size: 17px; margin: 0 0 12px; }
+  .warn {
+    background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412;
+    border-radius: 10px; padding: 12px 16px; font-size: 13px; margin-bottom: 24px;
+  }
+  .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .kv .item { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .kv .item .k { font-size: 12px; color: var(--muted); }
+  .kv .item .v { font-size: 16px; font-weight: 700; margin-top: 2px; }
+  .kv .item .v.ours { color: var(--ours); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  svg { max-width: 100%; height: auto; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; background: #fff; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-size: 12.5px; }
+  th.ours, td.ours { background: #fff1f2; }
+  td.dim, th.dim { font-weight: 700; color: var(--muted); white-space: nowrap; width: 92px; }
+  .refs { font-size: 12.5px; color: var(--muted); }
+  .refs li { margin-bottom: 4px; }
+  .foot { font-size: 12px; color: var(--muted); margin-top: 24px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>YouMi Agent × 前沿论文对比</h1>
+  <p class="sub">计划复用 / 记忆复用方向的机制与收益对比 · 生成时间 2026-09-03</p>
+
+  <div class="warn">
+    ⚠️ <b>口径说明</b>：YouMi 的量化数字来自<b>合成基准 + 确定性 mock</b>；
+    APC / AgentReuse 来自各自<b>真实 benchmark</b>。三者口径不同、不可直接比较，
+    下方条形图仅作<b>量级参考</b>。定位散点图与机制矩阵为<b>定性对比</b>。
+  </div>
+
+  <div class="card">
+    <h2>YouMi Agent 一句话定位</h2>
+    <div class="kv">
+      <div class="item"><div class="k">复用对象</div><div class="v">多 Agent WorkflowPlan 骨架（角色+依赖拓扑）</div></div>
+      <div class="item"><div class="k">自进化</div><div class="v ours">双闭环：计划复用 + 经验沉淀（ToolGuardian 修复）</div></div>
+      <div class="item"><div class="k">成本优化</div><div class="v">昂贵大模型规划 / 廉价小模型适配（可选分层）</div></div>
+      <div class="item"><div class="k">差异化</div><div class="v">多 Agent DAG 骨架复用 + 工具经验沉淀，双闭环自进化</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>① 定位图：复用粒度 × 学习闭环</h2>
+    <svg viewBox="0 0 640 440" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif"><rect x="70" y="40" width="540" height="330" fill="#fafbfc" stroke="#e5e7eb"/><line x1="70" y1="205.0" x2="610" y2="205.0" stroke="#e5e7eb" stroke-dasharray="4 4"/><line x1="340.0" y1="40" x2="340.0" y2="370" stroke="#e5e7eb" stroke-dasharray="4 4"/><line x1="70" y1="370" x2="610" y2="370" stroke="#1a1d21"/><line x1="70" y1="370" x2="70" y2="40" stroke="#1a1d21"/><text x="70.0" y="390" font-size="11" fill="#6b7280" text-anchor="middle">0</text><text x="58" y="374.0" font-size="11" fill="#6b7280" text-anchor="end">0</text><text x="205.0" y="390" font-size="11" fill="#6b7280" text-anchor="middle">25</text><text x="58" y="291.5" font-size="11" fill="#6b7280" text-anchor="end">25</text><text x="340.0" y="390" font-size="11" fill="#6b7280" text-anchor="middle">50</text><text x="58" y="209.0" font-size="11" fill="#6b7280" text-anchor="end">50</text><text x="475.0" y="390" font-size="11" fill="#6b7280" text-anchor="middle">75</text><text x="58" y="126.5" font-size="11" fill="#6b7280" text-anchor="end">75</text><text x="610.0" y="390" font-size="11" fill="#6b7280" text-anchor="middle">100</text><text x="58" y="44.0" font-size="11" fill="#6b7280" text-anchor="end">100</text><text x="340.0" y="428" font-size="12" fill="#1a1d21" text-anchor="middle">复用抽象粒度 →（动作序列 → 多 Agent 骨架）</text><text x="18" y="205.0" font-size="12" fill="#1a1d21" text-anchor="middle" transform="rotate(-90 18 205.0)">学习 / 自进化闭环 →</text><circle cx="529.0" cy="106.0" r="9" fill="#e11d48" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>YouMi Agent (本框架 2026)：多 Agent DAG 骨架复用 + 工具经验沉淀，双闭环自进化</title></circle><text x="529.0" y="91.0" font-size="12" font-weight="700" fill="#e11d48" text-anchor="middle">YouMi Agent</text><circle cx="151.0" cy="304.0" r="6" fill="#94a3b8" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>APC (NeurIPS 2025)：test-time memory：提取计划模板，关键词匹配 + 小模型适配</title></circle><text x="151.0" y="292.0" font-size="12" font-weight="500" fill="#1a1d21" text-anchor="middle">APC</text><circle cx="259.0" cy="304.0" r="6" fill="#94a3b8" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>AgentReuse (计算机研究与发展 2024)：意图分类 + 关键参数识别的计划复用</title></circle><text x="259.0" y="292.0" font-size="12" font-weight="500" fill="#1a1d21" text-anchor="middle">AgentReuse</text><circle cx="491.2" cy="221.5" r="6" fill="#94a3b8" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>LEGOMem (AAMAS 2026)：模块化 procedural memory：任务轨迹拆成可复用 memory units</title></circle><text x="491.2" y="209.5" font-size="12" font-weight="500" fill="#1a1d21" text-anchor="middle">LEGOMem</text><circle cx="340.0" cy="122.5" r="6" fill="#94a3b8" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>ExpeL (AAAI 2024)：从成功/失败经验提取规则，Agent 自进化</title></circle><text x="340.0" y="110.5" font-size="12" font-weight="500" fill="#1a1d21" text-anchor="middle">ExpeL</text><circle cx="205.0" cy="155.5" r="6" fill="#94a3b8" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>Reflexion (NeurIPS 2023)：语言化自我反思（verbal RL），从反馈改进</title></circle><text x="205.0" y="143.5" font-size="12" font-weight="500" fill="#1a1d21" text-anchor="middle">Reflexion</text><circle cx="394.0" cy="89.5" r="6" fill="#94a3b8" fill-opacity="0.9" stroke="#fff" stroke-width="2"><title>Voyager ((arXiv) 2023)：技能库（code-as-skills）+ 自动课程，开放世界持续学习</title></circle><text x="394.0" y="77.5" font-size="12" font-weight="500" fill="#1a1d21" text-anchor="middle">Voyager</text><text x="610" y="52" font-size="11" fill="#6b7280" text-anchor="end">● 红色 = YouMi Agent（本框架）</text></svg>
+  </div>
+
+  <div class="card">
+    <h2>② 定量收益对比（量级参考，口径见页首警告）</h2>
+    <div class="grid2">
+      <div><svg viewBox="0 0 360 152" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif"><text x="130" y="18" font-size="13" font-weight="700" fill="#1a1d21">成本节省（相对不复用）</text><text x="122" y="64" font-size="12" fill="#1a1d21" text-anchor="end">YouMi Agent</text><rect x="130" y="50" width="173.9" height="26" rx="4" fill="#e11d48" fill-opacity="0.9"><title>YouMi Agent: 53.9%</title></rect><text x="309.9" y="68" font-size="12" font-weight="600" fill="#1a1d21">53.9%</text><text x="122" y="110" font-size="12" fill="#1a1d21" text-anchor="end">APC</text><rect x="130" y="96" width="162.3" height="26" rx="4" fill="#94a3b8" fill-opacity="0.9"><title>APC: 50.3%</title></rect><text x="298.3" y="114" font-size="12" font-weight="600" fill="#1a1d21">50.3%</text><text x="130" y="146" font-size="10" fill="#6b7280">口径：YouMi=合成基准(mock)，APC=真实应用；不可直接比较</text></svg></div>
+      <div><svg viewBox="0 0 360 198" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Microsoft YaHei, sans-serif"><text x="130" y="18" font-size="13" font-weight="700" fill="#1a1d21">延迟节省（相对不复用）</text><text x="122" y="64" font-size="12" fill="#1a1d21" text-anchor="end">YouMi Agent</text><rect x="130" y="50" width="88.3" height="26" rx="4" fill="#e11d48" fill-opacity="0.9"><title>YouMi Agent: 47.3%</title></rect><text x="224.3" y="68" font-size="12" font-weight="600" fill="#1a1d21">47.3%</text><text x="122" y="110" font-size="12" fill="#1a1d21" text-anchor="end">APC</text><rect x="130" y="96" width="50.9" height="26" rx="4" fill="#94a3b8" fill-opacity="0.9"><title>APC: 27.3%</title></rect><text x="186.9" y="114" font-size="12" font-weight="600" fill="#1a1d21">27.3%</text><text x="122" y="156" font-size="12" fill="#1a1d21" text-anchor="end">AgentReuse</text><rect x="130" y="142" width="173.9" height="26" rx="4" fill="#94a3b8" fill-opacity="0.9"><title>AgentReuse: 93.1%</title></rect><text x="309.9" y="160" font-size="12" font-weight="600" fill="#1a1d21">93.1%</text><text x="130" y="192" font-size="10" fill="#6b7280">口径：YouMi=合成基准(mock)，APC/AgentReuse=真实数据；不可直接比较</text></svg></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>③ 机制对比矩阵</h2>
+    <table><tr><th class="dim">维度</th><th class="ours">YouMi Agent</th><th class="">APC</th><th class="">AgentReuse</th><th class="">LEGOMem</th><th class="">ExpeL</th><th class="">Reflexion</th><th class="">Voyager</th></tr><tr><td class="dim">复用/记忆对象</td><td class="ours">多 Agent WorkflowPlan 骨架（角色+依赖拓扑）</td><td class="">单 Agent 动作序列的 plan template</td><td class="">意图 + 关键参数对应的执行计划</td><td class="">full-task / subtask memory units（多 Agent 轨迹）</td><td class="">经验规则（insights）</td><td class="">语言反思（verbal feedback）</td><td class="">可复用技能代码</td></tr><tr><td class="dim">架构模式</td><td class="ours">多 Agent（Plan-then-Execute）</td><td class="">单 Agent（Plan-Act / ReAct）</td><td class="">单 Agent（个人助手 / AIoT）</td><td class="">多 Agent（orchestrator + task agents）</td><td class="">单 Agent</td><td class="">单 Agent</td><td class="">单 Agent（具身，Minecraft）</td></tr><tr><td class="dim">检索/匹配方式</td><td class="ours">语义向量检索（PlanMemory，sqlite-vec）</td><td class="">关键词提取(GPT-4o-mini) + 精确匹配</td><td class="">意图分类 + 关键参数识别</td><td class="">语义 embedding RAG（三种检索策略）</td><td class="">经验库检索</td><td class="">记忆中的反思轨迹</td><td class="">技能库检索</td></tr><tr><td class="dim">学习信号</td><td class="ours">成功执行 Plan 持久化；负反馈累计触发工具修复</td><td class="">完成执行后提取模板入缓存</td><td class="">请求间语义相似性界定后复用</td><td class="">成功执行轨迹蒸馏为结构化记忆</td><td class="">成功/失败经验 → 提取规则</td><td class="">执行反馈 → 生成语言反思</td><td class="">试错成功 → 沉淀技能</td></tr><tr><td class="dim">自进化闭环</td><td class="ours">双闭环：计划复用 + 经验沉淀（ToolGuardian 修复）</td><td class="">静态缓存（无主动学习）</td><td class="">静态复用（无主动学习）</td><td class="">记忆增强（RAG），非主动自进化</td><td class="">强（经验 → 规则自进化）</td><td class="">中高（verbal RL）</td><td class="">强（技能库 + 自动课程）</td></tr><tr><td class="dim">成本优化</td><td class="ours">昂贵大模型规划 / 廉价小模型适配（可选分层）</td><td class="">大模型规划 + 小模型(LLaMA-3.1-8B)适配</td><td class="">毫秒级额外延迟实现复用</td><td class="">让 SLM 团队借记忆逼近 LLM 团队</td><td class="">无成本优化</td><td class="">无成本优化</td><td class="">无成本优化</td></tr><tr><td class="dim">验证数据</td><td class="ours">合成基准（5 族 + novel，确定性 mock）</td><td class="">多个真实 agent 应用</td><td class="">真实数据集（个人助手）</td><td class="">OfficeBench</td><td class="">HotpotQA 等问答/交互</td><td class="">HumanEval / ALFWorld 等</td><td class="">Minecraft 开放世界</td></tr><tr><td class="dim">开源</td><td class="ours">MIT（本仓库）</td><td class="">未开源</td><td class="">未开源</td><td class="">未开源</td><td class="">未开源</td><td class="">未开源</td><td class="">部分开源</td></tr></table>
+  </div>
+
+  <div class="card">
+    <h2>方案清单</h2>
+    <ol class="refs"><li><b>YouMi Agent</b> — 本框架 2026 · 本项目：多 Agent DAG 骨架复用 + 工具经验沉淀，双闭环自进化</li><li><b>APC</b> — NeurIPS 2025 · Stanford：test-time memory：提取计划模板，关键词匹配 + 小模型适配</li><li><b>AgentReuse</b> — 计算机研究与发展 2024 · 中国科学技术大学：意图分类 + 关键参数识别的计划复用</li><li><b>LEGOMem</b> — AAMAS 2026 · Microsoft：模块化 procedural memory：任务轨迹拆成可复用 memory units</li><li><b>ExpeL</b> — AAAI 2024 · UCLA / UIUC：从成功/失败经验提取规则，Agent 自进化</li><li><b>Reflexion</b> — NeurIPS 2023 · Northeastern / MIT：语言化自我反思（verbal RL），从反馈改进</li><li><b>Voyager</b> — (arXiv) 2023 · NVIDIA / Caltech：技能库（code-as-skills）+ 自动课程，开放世界持续学习</li></ol>
+  </div>
+
+  <p class="foot">由 experiments/render_html.py 生成 · 数据见 experiments/paper_comparison.py</p>
+</div>
+</body>
+</html>

@@ -268,6 +268,96 @@ async def test_plan_memory_miss_falls_back_to_llm():
 
 
 # ---------------------------------------------------------------------------
+# 测试：模板适配的结构确定性保留（关键：防小模型幻觉依赖）
+# ---------------------------------------------------------------------------
+
+async def test_apply_template_preserves_structure_despite_bad_adapt():
+    """适配模型返回了非法依赖（步骤依赖自己/循环），也要用模板结构覆盖。
+
+    这是骨架保真率的核心保障：适配只改写 task 文本，step_id / role /
+    depends_on 一律从模板复制，因此依赖拓扑不可能被小模型写坏。
+    """
+    template = WorkflowPlan(
+        name="行业分析模板",
+        steps=[
+            WorkflowStep(step_id="research", role="researcher",
+                         task="调研原始行业", depends_on=[]),
+            WorkflowStep(step_id="analyze", role="analyst",
+                         task="分析原始行业", depends_on=["research"]),
+            WorkflowStep(step_id="report", role="writer",
+                         task="撰写原始报告", depends_on=["analyze"]),
+        ],
+    )
+    plan_memory = MagicMock()
+    plan_memory.search_plan = AsyncMock(return_value=[(template, 0.9)])
+
+    # 适配模型幻觉：把 report 依赖自己、analyze 依赖 report（产生循环）
+    bad_adapted_json = json.dumps({
+        "name": "行业分析模板",
+        "steps": [
+            {"step_id": "research", "role": "researcher",
+             "task": "调研新行业 A", "depends_on": []},
+            {"step_id": "analyze", "role": "analyst",
+             "task": "分析新行业 A", "depends_on": ["report"]},
+            {"step_id": "report", "role": "writer",
+             "task": "撰写新行业 A 报告", "depends_on": ["report"]},
+        ],
+    })
+    master = _make_master(llm_response=bad_adapted_json)
+    planner = WorkflowPlanner(master, plan_memory=plan_memory, max_retries=1)
+
+    plan = await planner.generate_plan("调研新行业 A 并生成报告")
+
+    # 走 fast path
+    assert plan.metadata.get("source") == "memory"
+    # 结构完全取模板：依赖拓扑正确、无循环、无自我依赖
+    assert not plan.validate()
+    by_id = {s.step_id: s for s in plan.steps}
+    assert by_id["analyze"].depends_on == ["research"]
+    assert by_id["report"].depends_on == ["analyze"]
+    # task 文本取适配结果
+    assert by_id["report"].task == "撰写新行业 A 报告"
+
+
+# ---------------------------------------------------------------------------
+# 测试：适配模型少输出步骤时，缺失步骤的 task 用模板原文兜底
+# ---------------------------------------------------------------------------
+
+async def test_apply_template_short_adapt_falls_back_task_text():
+    """适配模型少返回一个步骤 → 缺失步骤的 task 用模板原文，结构仍完整。"""
+    template = WorkflowPlan(
+        name="翻译模板",
+        steps=[
+            WorkflowStep(step_id="translate", role="translator",
+                         task="翻译原文", depends_on=[]),
+            WorkflowStep(step_id="proofread", role="proofreader",
+                         task="校对译文", depends_on=["translate"]),
+        ],
+    )
+    plan_memory = MagicMock()
+    plan_memory.search_plan = AsyncMock(return_value=[(template, 0.9)])
+
+    # 只返回 1 步（漏了 proofread）
+    short_json = json.dumps({
+        "name": "翻译模板",
+        "steps": [
+            {"step_id": "translate", "role": "translator",
+             "task": "翻译新合同", "depends_on": []},
+        ],
+    })
+    master = _make_master(llm_response=short_json)
+    planner = WorkflowPlanner(master, plan_memory=plan_memory, max_retries=1)
+
+    plan = await planner.generate_plan("翻译一份新合同")
+
+    assert plan.metadata.get("source") == "memory"
+    assert len(plan.steps) == 2  # 结构取模板，仍 2 步
+    assert plan.steps[0].task == "翻译新合同"      # 有适配结果 → 用适配文本
+    assert plan.steps[1].task == "校对译文"        # 缺失 → 用模板原文
+    assert plan.steps[1].depends_on == ["translate"]
+
+
+# ---------------------------------------------------------------------------
 # 测试：无 LLM 客户端时抛出错误
 # ---------------------------------------------------------------------------
 

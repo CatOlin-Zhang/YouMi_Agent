@@ -28,6 +28,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _skeleton_signature(plan: WorkflowPlan) -> tuple:
+    """提取 plan 的骨架签名：有序 (step_id, role, 排序后 depends_on) 元组列表。
+
+    供复用路径把「命中的模板骨架」写入 metadata，以便评测层校验「适配是否忠实于
+    模板骨架」（骨架保真率）。忽略 task 文本，只保留结构与角色。
+    """
+    return tuple(sorted(
+        (s.step_id, s.role, tuple(sorted(s.depends_on)))
+        for s in plan.steps
+    ))
+
+
 # ---------------------------------------------------------------------------
 # LLM prompt 模板
 # ---------------------------------------------------------------------------
@@ -144,6 +157,7 @@ class WorkflowPlanner:
                                 "source": "memory",
                                 "task": user_task,
                                 "template_similarity": similarity,
+                                "template_skeleton": _skeleton_signature(template_plan),
                             }
                         })
                         logger.info(
@@ -233,7 +247,12 @@ class WorkflowPlanner:
         template: WorkflowPlan,
         user_task: str,
     ) -> WorkflowPlan:
-        """将模板 Plan 的 task 字段替换为适合新任务的描述
+        """将模板 Plan 的 task 字段替换为适合新任务的描述。
+
+        关键设计（骨架确定性保留）：适配模型**只负责改写各步骤的 task 文本**，
+        而 step_id / role / depends_on / allowed_tools 一律从模板**逐字段复制**，
+        不让模型重新生成结构。这从根本上避免了小适配模型（如 0.5b）幻觉出
+        「步骤依赖自己」「循环依赖」等非法依赖，从而消除 fallback 风暴。
 
         若没有 LLM 客户端，直接用 user_task 填充第一个步骤的 task，
         其余步骤保持原 task（降级策略）。
@@ -267,7 +286,16 @@ class WorkflowPlanner:
             )},
         ]
         response = await llm_client.complete(messages)
-        return self._parse_plan_json(response)
+        adapted = self._parse_plan_json(response)
+
+        # 骨架确定性保留：结构取模板，task 文本取适配结果（按索引对齐，缺失兜底模板原文）
+        new_steps = []
+        for i, tmpl_step in enumerate(template.steps):
+            task_text = tmpl_step.task
+            if i < len(adapted.steps):
+                task_text = adapted.steps[i].task or tmpl_step.task
+            new_steps.append(tmpl_step.model_copy(update={"task": task_text[:500]}))
+        return template.model_copy(update={"steps": new_steps})
 
     # -----------------------------------------------------------------------
     # JSON 解析
