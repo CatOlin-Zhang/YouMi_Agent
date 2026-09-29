@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict, deque
 from enum import Enum
 from typing import Any
@@ -253,7 +254,8 @@ class WorkflowPlan(BaseModel):
     def get_step(self, step_id: str) -> WorkflowStep | None:
         """按 ID 获取步骤"""
         for s in self.steps:
-            return s if s.step_id == step_id else None
+            if s.step_id == step_id:
+                return s
         return None
 
 
@@ -406,7 +408,6 @@ class WorkflowExecutor:
 
         # 开始执行
         result.status = StepStatus.RUNNING
-        import time
         result.started_at = time.time()
 
         if self._on_step_start:
@@ -492,8 +493,7 @@ class WorkflowExecutor:
             result.status = StepStatus.FAILED
             result.error = last_error
 
-        import time as _time
-        result.finished_at = _time.time()
+        result.finished_at = time.time()
 
         if self._on_step_complete:
             try:

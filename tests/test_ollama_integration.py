@@ -13,9 +13,28 @@
 import asyncio
 import sys
 import os
+import socket
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _ollama_available(host: str = "localhost", port: int = 11434, timeout: float = 1.0) -> bool:
+    """探测本地 Ollama 服务是否可达（TCP 检查）"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+# Ollama 不可达时整模块跳过（本地真实集成测试，非纯单测）
+pytestmark = pytest.mark.skipif(
+    not _ollama_available(),
+    reason="需要本地 Ollama 服务 (localhost:11434)，未检测到",
+)
 
 from youmi.core.agent import Agent, AgentConfig, AgentStatus
 from youmi.core.types import LLMConfig, LLMProvider

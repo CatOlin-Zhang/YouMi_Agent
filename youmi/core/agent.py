@@ -21,22 +21,14 @@ import asyncio
 import httpx
 import json
 import logging
-import os
 import re
-import traceback as _traceback_mod
-import uuid
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any
-
-from pydantic import BaseModel, Field
 
 from youmi.core.types import (
     AgentMessage,
     AgentMetadata,
-    HandoffConfig,
-    HandoffRule,
     LLMConfig,
     MemoryConfig,
     MessageRole,
@@ -50,7 +42,6 @@ from youmi.core.prompt import PromptAssembler, PromptLayer
 from youmi.llm.client import LLMClient, LLMResponse
 from youmi.memory.base import MemoryAdapter
 from youmi.memory.memory import MemoryManager
-from youmi.memory.strategies.base import MemoryStrategy
 
 # 延迟导入避免循环依赖
 from typing import TYPE_CHECKING
@@ -689,6 +680,23 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         )
         return result
 
+    async def _ensure_chat_initialized(self) -> None:
+        """chat_turn / chat_turn_stream 共享的初始化逻辑
+
+        首次调用时自动初始化 conversation 并确保 Agent 处于 IDLE 状态。
+        """
+        if not hasattr(self, '_chat_initialized') or not self._chat_initialized:
+            if self._status == AgentStatus.CREATED:
+                await self.initialize()
+            self._conversation = []
+            if self._config.system_prompt:
+                self._conversation.append(
+                    {"role": "system", "content": self._config.system_prompt}
+                )
+            self._chat_initialized = True
+            if self._status not in (AgentStatus.IDLE, AgentStatus.RUNNING):
+                self._status = AgentStatus.IDLE
+
     async def chat_turn(self, message: str) -> dict[str, Any]:
         """单轮对话 — 多轮聊天接口
 
@@ -707,19 +715,7 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
             - tool_calls (list[str]): 本轮调用的工具名列表
             - error (str | None): 错误信息
         """
-        # 首次调用: 初始化 conversation 并设为 IDLE
-        if not hasattr(self, '_chat_initialized') or not self._chat_initialized:
-            if self._status == AgentStatus.CREATED:
-                await self.initialize()
-            self._conversation = []
-            if self._config.system_prompt:
-                self._conversation.append(
-                    {"role": "system", "content": self._config.system_prompt}
-                )
-            self._chat_initialized = True
-            # 确保状态为 IDLE
-            if self._status not in (AgentStatus.IDLE, AgentStatus.RUNNING):
-                self._status = AgentStatus.IDLE
+        await self._ensure_chat_initialized()
 
         # 追加用户消息
         self._conversation.append({"role": "user", "content": message})
@@ -787,18 +783,7 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
             str: 文本块（LLM 流式输出的 token）
             dict: 最终结果（最后一个 yield，包含 response/iterations/tool_calls/error）
         """
-        # 首次调用: 初始化 conversation 并设为 IDLE
-        if not hasattr(self, '_chat_initialized') or not self._chat_initialized:
-            if self._status == AgentStatus.CREATED:
-                await self.initialize()
-            self._conversation = []
-            if self._config.system_prompt:
-                self._conversation.append(
-                    {"role": "system", "content": self._config.system_prompt}
-                )
-            self._chat_initialized = True
-            if self._status not in (AgentStatus.IDLE, AgentStatus.RUNNING):
-                self._status = AgentStatus.IDLE
+        await self._ensure_chat_initialized()
 
         # 追加用户消息
         self._conversation.append({"role": "user", "content": message})
@@ -1483,8 +1468,6 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         )
 
     # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
     # 生命周期钩子 — 子类可覆写
     # -----------------------------------------------------------------------
 
@@ -1505,7 +1488,6 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         # P2: OC-5 — 自动卸载所有插件
         if hasattr(self, '_plugin_manager') and len(self._plugin_manager) > 0:
             await self._plugin_manager.unregister_all()
-        pass
 
     async def on_message_received(self, message: AgentMessage) -> None:
         """消息接收钩子"""
@@ -1664,7 +1646,6 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
             )
             content = response.content.strip()
             # 尝试解析 JSON
-            import re
             json_match = re.search(r'\{[^}]+\}', content, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())

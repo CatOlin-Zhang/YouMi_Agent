@@ -527,8 +527,6 @@ class MasterAgent(ToolApprovalMixin, Agent):
         Returns:
             {agent_id: TaskResult} 映射
         """
-        import asyncio
-
         pending = [
             rec for rec in self._sub_agents.values()
             if rec.result is None and rec.agent.status in (
