@@ -16,8 +16,8 @@ def _ev(type_: str, **kw) -> dict:
 
 
 # ---- 连接生命周期 ----
-def hello(master_id: str = "") -> dict:
-    return _ev("hello", master_id=master_id)
+def hello(master_id: str = "", auth_enabled: bool = False) -> dict:
+    return _ev("hello", master_id=master_id, auth_enabled=auth_enabled)
 
 
 def pong() -> dict:

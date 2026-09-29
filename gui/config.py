@@ -7,6 +7,10 @@
 - YOUMI_GUI_MCP    (默认 1，启用 MCP 工具调用层)
 - YOUMI_GUI_BUS    (默认 1，启用进程内消息总线)
 - YOUMI_GUI_VAULT  (默认 1，启用 ToolVault + ToolStore sqlite-vec 方案)
+
+认证由 ``YOUMI_AUTH_TOKEN`` / ``YOUMI_AUTH_TOKENS`` 控制（见 youmi/security/auth.py）：
+未配置时零摩擦放行；配置后所有 ``/api/*`` 与 ``/ws`` 需要 token（``?token=`` 或
+``Authorization: Bearer``），前端用 ``/?token=xxx`` 打开一次即可自动记住。
 """
 
 from __future__ import annotations

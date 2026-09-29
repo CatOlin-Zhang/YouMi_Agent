@@ -132,6 +132,7 @@ class Session:
     name: str
     owner_agent_id: str = ""
     member_ids: list = field(default_factory=list)
+    tenant: str = "default"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -142,6 +143,7 @@ class Session:
             "name": self.name,
             "owner_agent_id": self.owner_agent_id,
             "member_ids": list(self.member_ids),
+            "tenant": self.tenant,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -154,6 +156,7 @@ class Session:
             name=d.get("name", ""),
             owner_agent_id=d.get("owner_agent_id", ""),
             member_ids=list(d.get("member_ids", [])),
+            tenant=d.get("tenant", "default"),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
         )

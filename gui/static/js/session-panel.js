@@ -9,6 +9,7 @@
 // 依赖: initSidebar() 注入 DOM 引用后可使用。
 
 import { Store, colorForAgent } from "./state.js";
+import { authHeaders } from "./auth.js";
 import { sendCommand } from "./ws.js";
 import { renderChat, startTurn, addSegment, scrollToBottom } from "./chat-renderer.js";
 import { renderWorkflow } from "./panels.js";
@@ -27,7 +28,7 @@ export function initSidebar(els) {
 
 export async function loadAgents() {
   try {
-    const res = await fetch("/api/agents");
+    const res = await fetch("/api/agents", { headers: authHeaders() });
     const data = await res.json();
     Store.contacts = data.agents || [];
     const master = Store.contacts.find((a) => a.role === "master" || a.name === "master");
@@ -40,7 +41,7 @@ export async function loadAgents() {
 
 export async function loadSessions() {
   try {
-    const res = await fetch("/api/sessions");
+    const res = await fetch("/api/sessions", { headers: authHeaders() });
     const data = await res.json();
     Store.sessions = data.sessions || [];
   } catch (e) {
@@ -111,7 +112,10 @@ function confirmDeleteSession(sess) {
     [],
     async () => {
       try {
-        await fetch(`/api/sessions/${sess.session_id}`, { method: "DELETE" });
+        await fetch(`/api/sessions/${sess.session_id}`, {
+          method: "DELETE",
+          headers: authHeaders(),
+        });
       } catch (e) {
         console.warn("删除会话失败", e);
       }
@@ -232,7 +236,7 @@ export async function openSession(sid) {
   Store.workflowSteps = [];
   Store.workflowComplete = false;
   try {
-    const res = await fetch(`/api/sessions/${sid}`);
+    const res = await fetch(`/api/sessions/${sid}`, { headers: authHeaders() });
     const data = await res.json();
     Store.messages = data.messages || [];
     Store.members = data.members || [];
@@ -257,7 +261,7 @@ export async function openSession(sid) {
 export async function createSession(type, name) {
   const res = await fetch("/api/sessions", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ type, name }),
   });
   const data = await res.json();

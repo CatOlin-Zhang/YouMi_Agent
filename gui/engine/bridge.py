@@ -244,7 +244,14 @@ class EngineBridge:
     # 事件广播
     # ------------------------------------------------------------------
     def _emit(self, event: dict) -> None:
-        asyncio.ensure_future(self.hub.broadcast(event))
+        asyncio.ensure_future(
+            self.hub.broadcast(event, tenant=self._event_tenant())
+        )
+
+    def _event_tenant(self) -> str | None:
+        """当前轮次事件的目标租户（无活跃会话时 None = 广播给所有连接）"""
+        sess = self.sessions.get(self.active_session_id or "")
+        return sess.tenant if sess else None
 
     # ------------------------------------------------------------------
     # 消息生命周期（气泡的创建 / 追加 / 收尾 + 持久化）
@@ -362,12 +369,19 @@ class EngineBridge:
             return self.mcp_service.get_tool_stats()
         return {"providers": 0, "tools": 0, "calls": 0, "errors": 0}
 
-    def list_sessions(self) -> list[dict]:
-        return [s.to_dict() for s in self.sessions.values()]
+    def list_sessions(self, tenant: str | None = None) -> list[dict]:
+        """列出会话；tenant 非 None 时仅返回该租户的会话。"""
+        return [
+            s.to_dict() for s in self.sessions.values()
+            if tenant is None or s.tenant == tenant
+        ]
 
-    def get_session(self, session_id: str) -> dict | None:
+    def get_session(self, session_id: str, tenant: str | None = None) -> dict | None:
+        """获取会话详情；tenant 非 None 时校验归属，不匹配返回 None。"""
         sess = self.sessions.get(session_id)
         if not sess:
+            return None
+        if tenant is not None and sess.tenant != tenant:
             return None
         messages = self.store.load_messages(session_id)
         members = [
@@ -382,7 +396,11 @@ class EngineBridge:
         }
 
     async def create_session(
-        self, type_: str, name: str, member_roles: list[str] | None = None
+        self,
+        type_: str,
+        name: str,
+        member_roles: list[str] | None = None,
+        tenant: str = "default",
     ) -> dict:
         owner = self.master.agent_id
         sess = Session(
@@ -391,20 +409,33 @@ class EngineBridge:
             name=name or ("群聊" if type_ == "group" else "单聊"),
             owner_agent_id=owner,
             member_ids=[owner],
+            tenant=tenant or "default",
         )
         self.sessions[sess.session_id] = sess
         self.store.save_state(self.sessions, self.cards)
         self._emit(session_created(sess.to_dict()))
         return sess.to_dict()
 
-    async def delete_session(self, session_id: str) -> None:
+    async def delete_session(self, session_id: str, tenant: str | None = None) -> None:
+        """删除会话；tenant 非 None 时仅允许删除归属该租户的会话。"""
+        sess = self.sessions.get(session_id)
+        if sess is None:
+            return
+        if tenant is not None and sess.tenant != tenant:
+            logger.warning(
+                "拒绝跨租户删除会话: session=%s tenant=%s",
+                session_id, tenant,
+            )
+            return
         self.sessions.pop(session_id, None)
         self.store.delete_session(session_id)
         self.store.save_state(self.sessions, self.cards)
         self._emit(session_deleted(session_id))
 
-    async def push_history(self, ws: Any, session_id: str) -> None:
-        data = self.get_session(session_id)
+    async def push_history(
+        self, ws: Any, session_id: str, tenant: str | None = None,
+    ) -> None:
+        data = self.get_session(session_id, tenant=tenant)
         if data:
             await self.hub.send(ws, history(
                 session_id, data["messages"], data["members"]
@@ -413,9 +444,17 @@ class EngineBridge:
     # ------------------------------------------------------------------
     # 核心：用户发言 → 群聊一轮
     # ------------------------------------------------------------------
-    async def send_user_message(self, session_id: str, text: str) -> None:
+    async def send_user_message(
+        self, session_id: str, text: str, tenant: str | None = None,
+    ) -> None:
         sess = self.sessions.get(session_id)
         if not sess:
+            self._emit(error("会话不存在", session_id))
+            return
+        if tenant is not None and sess.tenant != tenant:
+            logger.warning(
+                "拒绝跨租户发送消息: session=%s tenant=%s", session_id, tenant,
+            )
             self._emit(error("会话不存在", session_id))
             return
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
@@ -476,10 +515,20 @@ class EngineBridge:
     # 群聊：把配置好的某个角色作为成员拉进群
     # ------------------------------------------------------------------
     async def add_member(
-        self, session_id: str, role: str, task: str, system_prompt: str = ""
+        self,
+        session_id: str,
+        role: str,
+        task: str,
+        system_prompt: str = "",
+        tenant: str | None = None,
     ) -> None:
         sess = self.sessions.get(session_id)
         if not sess:
+            return
+        if tenant is not None and sess.tenant != tenant:
+            logger.warning(
+                "拒绝跨租户加成员: session=%s tenant=%s", session_id, tenant,
+            )
             return
         self.active_session_id = session_id
         try:

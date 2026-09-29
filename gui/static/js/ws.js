@@ -1,9 +1,10 @@
 // WebSocket 客户端封装：自动重连 + 把消息以 CustomEvent 派发出去。
 import { Store } from "./state.js";
+import { tokenQuery } from "./auth.js";
 
 export function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${proto}://${location.host}/ws`;
+  const url = `${proto}://${location.host}/ws${tokenQuery()}`;
   const ws = new WebSocket(url);
   Store.ws = ws;
 

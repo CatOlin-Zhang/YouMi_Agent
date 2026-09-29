@@ -4,13 +4,15 @@
 1. 创建 aiohttp Application，注册路由与中间件
 2. 启动时初始化 EngineBridge（MasterAgent + Hooks）
 3. 静态资源服务（gui/static/）
-4. REST API：agents / sessions / messages
+4. REST API：agents / sessions / messages / audit
 5. WebSocket 端点：实时双向通信（命令分发 + 事件广播）
+6. 认证中间件（YOUMI_AUTH_* 配置启用式）+ 健康检查 /healthz
 
 用法::
 
     python -m gui                     # 默认 127.0.0.1:8766
     YOUMI_GUI_PORT=9000 python -m gui # 自定义端口
+    YOUMI_AUTH_TOKEN=secret python -m gui  # 启用认证（用 /?token=secret 打开页面）
 """
 
 from __future__ import annotations
@@ -27,8 +29,61 @@ from gui.config import GUIConfig, load_config
 from gui.engine.bridge import EngineBridge
 from gui.hub.events import hello, pong, tool_list as tool_list_event
 from gui.hub.ws_hub import WebSocketHub
+from youmi.observability import get_audit_logger
+from youmi.security import AuthManager, AuthRole, Principal, get_auth_manager
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 认证中间件（YOUMI_AUTH_* 配置启用式）
+# ---------------------------------------------------------------------------
+
+def _extract_token(request: web.Request) -> str:
+    """提取请求中的 token（``Authorization: Bearer`` 优先，兼容 ``?token=``）"""
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.query.get("token", "")
+
+
+@web.middleware
+async def auth_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    """认证中间件 — 保护 ``/api/*`` 与 ``/ws``。
+
+    策略（配置启用式）:
+    - 未配置 token → 零摩擦放行（主体为匿名 admin），保持既有行为
+    - 配置 token 后 → 校验 ``Authorization: Bearer`` / ``?token=``，
+      失败返回 401 并写审计（auth / denied）
+
+    豁免路径: ``/``、``/static/*``、``/healthz``（探活）。
+    """
+    path = request.path
+    if not (path.startswith("/api/") or path == "/ws"):
+        return await handler(request)
+
+    auth = get_auth_manager()
+    if not auth.enabled:
+        request["principal"] = auth.validate("")
+        return await handler(request)
+
+    token = _extract_token(request)
+    principal = auth.validate(token)
+    if principal is None:
+        logger.warning("GUI 认证失败: path=%s remote=%s", path, request.remote)
+        get_audit_logger().log(
+            "auth",
+            status="denied",
+            detail={"remote": str(request.remote), "path": path},
+            error="Invalid or missing token",
+        )
+        return web.json_response(
+            {"error": "Unauthorized: invalid or missing token"},
+            status=401,
+        )
+
+    request["principal"] = principal
+    return await handler(request)
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +105,7 @@ def create_app(
     """
     config = config or load_config()
 
-    app = web.Application()
+    app = web.Application(middlewares=[auth_middleware])
     app["config"] = config
     app["hub"] = WebSocketHub()
     if use_mock:
@@ -104,6 +159,12 @@ async def _on_cleanup(app: web.Application) -> None:
 # REST 端点
 # ---------------------------------------------------------------------------
 
+def _request_tenant(request: web.Request) -> str:
+    """从认证主体提取租户（中间件保证已设置 principal，匿名主体为 default）"""
+    principal: Principal | None = request.get("principal")
+    return principal.tenant if principal else "default"
+
+
 async def _handle_list_agents(request: web.Request) -> web.Response:
     """GET /api/agents — 列出 youmi/agents/ 下所有可用角色。"""
     bridge: EngineBridge = request.app["bridge"]
@@ -112,23 +173,25 @@ async def _handle_list_agents(request: web.Request) -> web.Response:
 
 
 async def _handle_list_sessions(request: web.Request) -> web.Response:
-    """GET /api/sessions — 列出所有会话。"""
+    """GET /api/sessions — 列出当前租户的所有会话。"""
     bridge: EngineBridge = request.app["bridge"]
-    return web.json_response({"sessions": bridge.list_sessions()})
+    return web.json_response({
+        "sessions": bridge.list_sessions(tenant=_request_tenant(request)),
+    })
 
 
 async def _handle_get_session(request: web.Request) -> web.Response:
     """GET /api/sessions/{session_id} — 获取单个会话详情（含消息历史和成员）。"""
     bridge: EngineBridge = request.app["bridge"]
     session_id = request.match_info["session_id"]
-    data = bridge.get_session(session_id)
+    data = bridge.get_session(session_id, tenant=_request_tenant(request))
     if data is None:
         raise web.HTTPNotFound(text=f"Session '{session_id}' not found")
     return web.json_response(data)
 
 
 async def _handle_create_session(request: web.Request) -> web.Response:
-    """POST /api/sessions — 创建新会话。
+    """POST /api/sessions — 创建新会话（归属当前租户）。
 
     Body JSON::
 
@@ -139,15 +202,16 @@ async def _handle_create_session(request: web.Request) -> web.Response:
     result = await bridge.create_session(
         type_=body.get("type", "single"),
         name=body.get("name", ""),
+        tenant=_request_tenant(request),
     )
     return web.json_response(result, status=201)
 
 
 async def _handle_delete_session(request: web.Request) -> web.Response:
-    """DELETE /api/sessions/{session_id} — 删除会话及其消息。"""
+    """DELETE /api/sessions/{session_id} — 删除会话及其消息（限本租户）。"""
     bridge: EngineBridge = request.app["bridge"]
     session_id = request.match_info["session_id"]
-    await bridge.delete_session(session_id)
+    await bridge.delete_session(session_id, tenant=_request_tenant(request))
     return web.json_response({"ok": True})
 
 
@@ -157,6 +221,52 @@ async def _handle_list_tools(request: web.Request) -> web.Response:
     tools = await bridge.list_tools()
     stats = bridge.get_tool_stats()
     return web.json_response({"tools": tools, "stats": stats})
+
+
+async def _handle_healthz(request: web.Request) -> web.Response:
+    """GET /healthz — 健康探活（免认证，供负载均衡 / 监控使用）。"""
+    bridge = request.app.get("bridge")
+    engine_ready = bool(
+        bridge is not None
+        and (getattr(bridge, "master", None) is not None
+             or getattr(bridge, "master_id", ""))
+    )
+    return web.json_response({
+        "status": "ok",
+        "auth_enabled": get_auth_manager().enabled,
+        "audit_enabled": get_audit_logger().enabled,
+        "engine_ready": engine_ready,
+        "connected_clients": request.app["hub"].count,
+    })
+
+
+async def _handle_audit(request: web.Request) -> web.Response:
+    """GET /api/audit — 查询最近审计事件（需要 admin 角色）。
+
+    Query 参数:
+        limit: 最大条数（默认 100，上限 1000）
+        event_type: 过滤事件类型（llm_call / tool_call / auth ...）
+    """
+    principal: Principal | None = request.get("principal")
+    if not AuthManager.has_role(principal, AuthRole.ADMIN):
+        raise web.HTTPForbidden(text="Forbidden: admin role required")
+
+    try:
+        limit = int(request.query.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 1000))
+    event_type = request.query.get("event_type", "")
+    # 审计按租户隔离: admin 仅能看到本租户事件
+    tenant = principal.tenant if principal else "default"
+
+    events = get_audit_logger().get_recent(
+        limit=limit, event_type=event_type, tenant=tenant,
+    )
+    return web.json_response({
+        "events": [e.model_dump() for e in events],
+        "count": len(events),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -175,14 +285,22 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     hub: WebSocketHub = request.app["hub"]
-    hub.add(ws)
-    logger.info("WebSocket 客户端已连接 (总数=%d)", hub.count)
+    principal: Principal | None = request.get("principal")
+    tenant = principal.tenant if principal else "default"
+    hub.add(ws, tenant=tenant)
+    logger.info(
+        "WebSocket 客户端已连接 (总数=%d, role=%s, tenant=%s)",
+        hub.count, principal.role.value if principal else "?", tenant,
+    )
 
     try:
         # 握手
         bridge: EngineBridge = request.app["bridge"]
         master_id = bridge.master.agent_id if bridge.master else ""
-        await hub.send(ws, hello(master_id=master_id))
+        await hub.send(
+            ws,
+            hello(master_id=master_id, auth_enabled=get_auth_manager().enabled),
+        )
 
         # 推送 MCP 工具列表（如果可用）
         if hasattr(bridge, 'list_tools'):
@@ -195,7 +313,7 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
 
         async for raw_msg in ws:
             if raw_msg.type == web.WSMsgType.TEXT:
-                await _dispatch_ws_command(request.app, ws, raw_msg.data)
+                await _dispatch_ws_command(app=request.app, ws=ws, raw=raw_msg.data, tenant=tenant)
             elif raw_msg.type == web.WSMsgType.ERROR:
                 logger.warning("WebSocket 错误: %s", ws.exception())
     finally:
@@ -206,7 +324,10 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
 
 
 async def _dispatch_ws_command(
-    app: web.Application, ws: web.WebSocketResponse, raw: str,
+    app: web.Application,
+    ws: web.WebSocketResponse,
+    raw: str,
+    tenant: str = "default",
 ) -> None:
     """解析并分发客户端 WebSocket 命令。
 
@@ -219,6 +340,8 @@ async def _dispatch_ws_command(
         {"type": "delete_session", "session_id": "..."}
         {"type": "add_member", "session_id": "...", "role": "coder", "task": "..."}
         {"type": "typing", "session_id": "..."}
+
+    所有会话命令均按连接认证租户隔离。
     """
     hub: WebSocketHub = app["hub"]
     bridge: EngineBridge = app["bridge"]
@@ -240,37 +363,40 @@ async def _dispatch_ws_command(
         if not session_id or not text.strip():
             await hub.send(ws, {"type": "error", "message": "缺少 session_id 或 text"})
             return
-        await bridge.send_user_message(session_id, text)
+        await bridge.send_user_message(session_id, text, tenant=tenant)
 
     elif cmd_type == "get_history":
         session_id = cmd.get("session_id", "")
         if session_id:
-            await bridge.push_history(ws, session_id)
+            await bridge.push_history(ws, session_id, tenant=tenant)
 
     elif cmd_type == "create_session":
         await bridge.create_session(
             type_=cmd.get("type", "single"),
             name=cmd.get("name", ""),
+            tenant=tenant,
         )
 
     elif cmd_type == "delete_session":
         session_id = cmd.get("session_id", "")
         if session_id:
-            await bridge.delete_session(session_id)
+            await bridge.delete_session(session_id, tenant=tenant)
 
     elif cmd_type == "add_member":
         session_id = cmd.get("session_id", "")
         role = cmd.get("role", "")
         task = cmd.get("task", "")
         if session_id and role:
-            await bridge.add_member(session_id, role, task)
+            await bridge.add_member(session_id, role, task, tenant=tenant)
 
     elif cmd_type == "typing":
-        # 打字状态由前端 P2P 广播，后端仅做透传
+        # 打字状态由前端 P2P 广播，后端仅做透传（限同租户）
         from gui.hub.events import typing as typing_event
         session_id = cmd.get("session_id", "")
         agent_id = cmd.get("agent_id", "__user__")
-        await hub.broadcast(typing_event(session_id, agent_id, True))
+        await hub.broadcast(
+            typing_event(session_id, agent_id, True), tenant=tenant,
+        )
 
     else:
         await hub.send(ws, {
@@ -285,12 +411,14 @@ async def _dispatch_ws_command(
 
 def _setup_routes(app: web.Application) -> None:
     """注册 REST + WebSocket 路由。"""
+    app.router.add_get("/healthz", _handle_healthz)
     app.router.add_get("/api/agents", _handle_list_agents)
     app.router.add_get("/api/sessions", _handle_list_sessions)
     app.router.add_get("/api/sessions/{session_id}", _handle_get_session)
     app.router.add_post("/api/sessions", _handle_create_session)
     app.router.add_delete("/api/sessions/{session_id}", _handle_delete_session)
     app.router.add_get("/api/tools", _handle_list_tools)
+    app.router.add_get("/api/audit", _handle_audit)
     app.router.add_get("/ws", _handle_ws)
 
 
