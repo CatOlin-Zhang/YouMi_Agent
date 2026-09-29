@@ -5,8 +5,10 @@ SQLite 持久化后端
 无需额外依赖 (不依赖 aiosqlite)。
 
 数据表:
-- sessions: session_id, agent_id, created_at, updated_at, metadata
+- sessions: session_id, agent_id, tenant, created_at, updated_at, metadata
 - messages: id, session_id, role, content, raw_data, timestamp
+
+多租户: sessions 表带 tenant 列 (旧库 initialize 时自动补齐, 旧数据归 'default')。
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
+    tenant TEXT NOT NULL DEFAULT 'default',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     metadata TEXT DEFAULT '{}'
@@ -90,8 +93,24 @@ class SQLiteBackend(PersistenceBackend):
         await asyncio.to_thread(self._conn.execute, "PRAGMA foreign_keys = ON;")
         # 建表
         await asyncio.to_thread(self._conn.executescript, _CREATE_TABLES_SQL)
+        # 旧库迁移: 补 tenant 列 (旧数据归 default)
+        await asyncio.to_thread(self._migrate_tenant_column)
         await asyncio.to_thread(self._conn.commit)
         logger.debug("SQLiteBackend initialized: %s", self._db_path)
+
+    def _migrate_tenant_column(self) -> None:
+        """旧库迁移: sessions 缺 tenant 列时补齐并建索引"""
+        conn = self._ensure_conn()
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "tenant" not in cols:
+            conn.execute(
+                "ALTER TABLE sessions "
+                "ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'"
+            )
+            logger.info("SQLiteBackend: migrated sessions table with tenant column")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions(tenant)"
+        )
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -104,6 +123,7 @@ class SQLiteBackend(PersistenceBackend):
         agent_id: str,
         messages: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
+        tenant: str = "default",
     ) -> None:
         conn = self._ensure_conn()
         now = datetime.utcnow().isoformat()
@@ -111,15 +131,19 @@ class SQLiteBackend(PersistenceBackend):
         def _save():
             cursor = conn.cursor()
             try:
-                # upsert session 记录
+                # upsert session 记录 (已存在时保留原 tenant 归属)
                 cursor.execute(
-                    """INSERT INTO sessions (session_id, agent_id, created_at, updated_at, metadata)
-                       VALUES (?, ?, ?, ?, ?)
+                    """INSERT INTO sessions
+                       (session_id, agent_id, tenant, created_at, updated_at, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?)
                        ON CONFLICT(session_id) DO UPDATE SET
                            updated_at = excluded.updated_at,
                            metadata = excluded.metadata
                     """,
-                    (session_id, agent_id, now, now, json.dumps(metadata or {})),
+                    (
+                        session_id, agent_id, tenant, now, now,
+                        json.dumps(metadata or {}),
+                    ),
                 )
 
                 # 删除旧消息，写入新消息
@@ -166,22 +190,30 @@ class SQLiteBackend(PersistenceBackend):
 
         return await asyncio.to_thread(_load)
 
-    async def list_sessions(self, agent_id: str) -> list[SessionRecord]:
+    async def list_sessions(
+        self, agent_id: str, tenant: str | None = None,
+    ) -> list[SessionRecord]:
         conn = self._ensure_conn()
 
         def _list():
-            cursor = conn.execute(
-                """SELECT session_id, agent_id, created_at, updated_at, metadata
-                   FROM sessions WHERE agent_id = ?
-                   ORDER BY updated_at DESC""",
-                (agent_id,),
+            sql = (
+                "SELECT session_id, agent_id, tenant, created_at, updated_at, "
+                "metadata FROM sessions WHERE agent_id = ?"
             )
+            params: list[Any] = [agent_id]
+            if tenant is not None:
+                sql += " AND tenant = ?"
+                params.append(tenant)
+            sql += " ORDER BY updated_at DESC"
+
+            cursor = conn.execute(sql, params)
             rows = cursor.fetchall()
             records = []
-            for sid, aid, created, updated, meta_str in rows:
+            for sid, aid, tn, created, updated, meta_str in rows:
                 records.append(SessionRecord(
                     session_id=sid,
                     agent_id=aid,
+                    tenant=tn or "default",
                     created_at=datetime.fromisoformat(created),
                     updated_at=datetime.fromisoformat(updated),
                     metadata=json.loads(meta_str) if meta_str else {},
@@ -200,23 +232,31 @@ class SQLiteBackend(PersistenceBackend):
 
         await asyncio.to_thread(_delete)
 
-    async def get_latest_session(self, agent_id: str) -> SessionRecord | None:
+    async def get_latest_session(
+        self, agent_id: str, tenant: str | None = None,
+    ) -> SessionRecord | None:
         conn = self._ensure_conn()
 
         def _get():
-            cursor = conn.execute(
-                """SELECT session_id, agent_id, created_at, updated_at, metadata
-                   FROM sessions WHERE agent_id = ?
-                   ORDER BY updated_at DESC LIMIT 1""",
-                (agent_id,),
+            sql = (
+                "SELECT session_id, agent_id, tenant, created_at, updated_at, "
+                "metadata FROM sessions WHERE agent_id = ?"
             )
+            params: list[Any] = [agent_id]
+            if tenant is not None:
+                sql += " AND tenant = ?"
+                params.append(tenant)
+            sql += " ORDER BY updated_at DESC LIMIT 1"
+
+            cursor = conn.execute(sql, params)
             row = cursor.fetchone()
             if row is None:
                 return None
-            sid, aid, created, updated, meta_str = row
+            sid, aid, tn, created, updated, meta_str = row
             return SessionRecord(
                 session_id=sid,
                 agent_id=aid,
+                tenant=tn or "default",
                 created_at=datetime.fromisoformat(created),
                 updated_at=datetime.fromisoformat(updated),
                 metadata=json.loads(meta_str) if meta_str else {},

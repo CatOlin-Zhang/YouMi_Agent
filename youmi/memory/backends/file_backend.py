@@ -43,6 +43,7 @@ class FileBackend(PersistenceBackend):
                 "<session_id>": {
                     "session_id": "...",
                     "agent_id": "...",
+                    "tenant": "default",
                     "created_at": "ISO-8601",
                     "updated_at": "ISO-8601",
                     "metadata": {},
@@ -91,6 +92,7 @@ class FileBackend(PersistenceBackend):
         agent_id: str,
         messages: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
+        tenant: str = "default",
     ) -> None:
         data = await self._read_agent_data(agent_id)
         now = datetime.utcnow().isoformat()
@@ -98,6 +100,8 @@ class FileBackend(PersistenceBackend):
         # 检查是否已有该 session
         existing = data["sessions"].get(session_id)
         created_at = existing.get("created_at", now) if existing else now
+        # 已存在时保留原 tenant 归属 (与 SQLiteBackend 对齐)
+        tenant_value = existing.get("tenant", "default") if existing else tenant
 
         # 序列化消息
         serialized_messages = []
@@ -113,6 +117,7 @@ class FileBackend(PersistenceBackend):
         data["sessions"][session_id] = {
             "session_id": session_id,
             "agent_id": agent_id,
+            "tenant": tenant_value,
             "created_at": created_at,
             "updated_at": now,
             "metadata": metadata or {},
@@ -150,13 +155,19 @@ class FileBackend(PersistenceBackend):
 
         return await asyncio.to_thread(_find)
 
-    async def list_sessions(self, agent_id: str) -> list[SessionRecord]:
+    async def list_sessions(
+        self, agent_id: str, tenant: str | None = None,
+    ) -> list[SessionRecord]:
         data = await self._read_agent_data(agent_id)
         records = []
         for sess in data.get("sessions", {}).values():
+            sess_tenant = sess.get("tenant", "default")
+            if tenant is not None and sess_tenant != tenant:
+                continue
             records.append(SessionRecord(
                 session_id=sess["session_id"],
                 agent_id=sess["agent_id"],
+                tenant=sess_tenant,
                 created_at=datetime.fromisoformat(sess["created_at"]),
                 updated_at=datetime.fromisoformat(sess["updated_at"]),
                 metadata=sess.get("metadata", {}),
@@ -184,6 +195,8 @@ class FileBackend(PersistenceBackend):
 
         await asyncio.to_thread(_delete)
 
-    async def get_latest_session(self, agent_id: str) -> SessionRecord | None:
-        sessions = await self.list_sessions(agent_id)
+    async def get_latest_session(
+        self, agent_id: str, tenant: str | None = None,
+    ) -> SessionRecord | None:
+        sessions = await self.list_sessions(agent_id, tenant=tenant)
         return sessions[0] if sessions else None

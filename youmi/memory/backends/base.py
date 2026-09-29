@@ -63,6 +63,7 @@ class SessionRecord(BaseModel):
 
     session_id: str
     agent_id: str
+    tenant: str = "default"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -108,6 +109,7 @@ class PersistenceBackend(ABC):
         agent_id: str,
         messages: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
+        tenant: str = "default",
     ) -> None:
         """保存一个 session 的完整对话记录
 
@@ -118,6 +120,7 @@ class PersistenceBackend(ABC):
             agent_id: 所属 Agent ID
             messages: OpenAI 格式的消息列表
             metadata: 可选的 session 元数据
+            tenant: 租户标识 (多租户隔离, 默认 "default")
         """
         ...
 
@@ -134,13 +137,16 @@ class PersistenceBackend(ABC):
         ...
 
     @abstractmethod
-    async def list_sessions(self, agent_id: str) -> list[SessionRecord]:
+    async def list_sessions(
+        self, agent_id: str, tenant: str | None = None,
+    ) -> list[SessionRecord]:
         """列出指定 Agent 的所有 session
 
         按 updated_at 降序排列 (最近的排前面)。
 
         Args:
             agent_id: Agent 唯一 ID
+            tenant: 按租户过滤 (None = 不过滤所有租户)
 
         Returns:
             SessionRecord 列表
@@ -157,11 +163,14 @@ class PersistenceBackend(ABC):
         ...
 
     @abstractmethod
-    async def get_latest_session(self, agent_id: str) -> SessionRecord | None:
+    async def get_latest_session(
+        self, agent_id: str, tenant: str | None = None,
+    ) -> SessionRecord | None:
         """获取指定 Agent 最近的 session
 
         Args:
             agent_id: Agent 唯一 ID
+            tenant: 按租户过滤 (None = 不过滤所有租户)
 
         Returns:
             最近的 SessionRecord，无 session 时返回 None

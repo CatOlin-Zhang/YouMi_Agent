@@ -5,6 +5,10 @@ GlobalMemory — 全局记忆核心
 经验专供工具管理 Agent（如 ToolGuardian）诊断和修复工具问题，
 修复完成后通过 mark_resolved() 标记解决并记录修复方案。
 
+多租户: 每个实例绑定一个 tenant（默认 "default"），写入自动归属该 tenant，
+查询仅返回同 tenant 的数据；同进程内可用 clone_for_tenant() 获取其他租户视图
+（共享数据库连接）。旧库在 initialize() 时自动补 tenant 列，旧数据归 default。
+
 数据表:
 - knowledge_entries: 知识条目主表
 - vec_knowledge_idx: sqlite-vec vec0 虚拟表 (归一化向量, KNN 查询)
@@ -82,6 +86,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     content TEXT NOT NULL,
     source_task_id TEXT DEFAULT '',
     source_agent_id TEXT DEFAULT '',
+    tenant TEXT NOT NULL DEFAULT 'default',
     success_rate REAL DEFAULT 0.0,
     resolved INTEGER DEFAULT 0,
     resolution TEXT DEFAULT '',
@@ -125,6 +130,7 @@ class GlobalMemory:
             默认 ".youmi_knowledge.db" (当前工作目录)。
         embedding_client: EmbeddingClient 实例 (None = 关键词检索降级)
         embedding_dim: Embedding 向量维度 (默认 768)
+        tenant: 租户标识 (多租户隔离, 默认 "default")
     """
 
     def __init__(
@@ -132,12 +138,41 @@ class GlobalMemory:
         db_path: str = ".youmi_knowledge.db",
         embedding_client: EmbeddingClient | None = None,
         embedding_dim: int = 768,
+        tenant: str = "default",
     ) -> None:
         self._db_path = db_path
         self._conn: sqlite3.Connection | None = None
         self._embedding_client = embedding_client
         self._embedding_dim = embedding_dim
+        self._tenant = tenant or "default"
         self._vec_available: bool = False
+
+    @property
+    def tenant(self) -> str:
+        """当前实例绑定的租户标识"""
+        return self._tenant
+
+    def clone_for_tenant(self, tenant: str) -> "GlobalMemory":
+        """获取同一数据库上的其他租户视图 (共享连接)
+
+        返回的新实例复用当前连接/向量能力/Embedding 客户端，
+        仅改变读写归属的租户，避免重复 initialize。
+
+        Args:
+            tenant: 目标租户标识
+
+        Returns:
+            绑定目标租户的 GlobalMemory 视图 (未初始化连接时为独立实例)
+        """
+        clone = GlobalMemory(
+            db_path=self._db_path,
+            embedding_client=self._embedding_client,
+            embedding_dim=self._embedding_dim,
+            tenant=tenant,
+        )
+        clone._conn = self._conn
+        clone._vec_available = self._vec_available
+        return clone
 
     # ==================================================================
     # 生命周期
@@ -156,6 +191,8 @@ class GlobalMemory:
         )
         await asyncio.to_thread(self._conn.execute, "PRAGMA foreign_keys = ON;")
         await asyncio.to_thread(self._conn.executescript, _CREATE_TABLES_SQL)
+        # 旧库迁移: 补 tenant 列 (旧数据归 default)
+        await asyncio.to_thread(self._migrate_tenant_column)
         await asyncio.to_thread(self._conn.commit)
 
         # 尝试加载 sqlite-vec
@@ -181,6 +218,21 @@ class GlobalMemory:
         if self._conn is None:
             raise RuntimeError("GlobalMemory not initialized. Call initialize() first.")
         return self._conn
+
+    def _migrate_tenant_column(self) -> None:
+        """旧库迁移: knowledge_entries 缺 tenant 列时补齐并建索引"""
+        conn = self._ensure_conn()
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge_entries)")}
+        if "tenant" not in cols:
+            conn.execute(
+                "ALTER TABLE knowledge_entries "
+                "ADD COLUMN tenant TEXT NOT NULL DEFAULT 'default'"
+            )
+            logger.info("GlobalMemory: migrated knowledge_entries with tenant column")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_tenant "
+            "ON knowledge_entries(tenant)"
+        )
 
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -223,6 +275,7 @@ class GlobalMemory:
             content=content,
             source_task_id=source_task_id,
             source_agent_id=source_agent_id,
+            tenant=self._tenant,
             success_rate=success_rate,
             metadata=metadata or {},
         )
@@ -290,6 +343,11 @@ class GlobalMemory:
         if not entries:
             return []
 
+        # 未指定租户的条目自动归属当前实例租户
+        for e in entries:
+            if e.tenant == "default":
+                e.tenant = self._tenant
+
         # 批量向量化
         pending = [
             e for e in entries
@@ -323,9 +381,9 @@ class GlobalMemory:
                 cursor.execute(
                     """INSERT INTO knowledge_entries
                        (entry_id, category, tool_name, content, source_task_id,
-                        source_agent_id, success_rate, resolved, resolution,
+                        source_agent_id, tenant, success_rate, resolved, resolution,
                         metadata, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(entry_id) DO UPDATE SET
                            content = excluded.content,
                            resolved = excluded.resolved,
@@ -340,6 +398,7 @@ class GlobalMemory:
                         entry.content,
                         entry.source_task_id,
                         entry.source_agent_id,
+                        entry.tenant,
                         entry.success_rate,
                         int(entry.resolved),
                         entry.resolution,
@@ -427,8 +486,8 @@ class GlobalMemory:
                 cursor.execute(
                     """UPDATE knowledge_entries
                        SET resolved = 1, resolution = ?, updated_at = ?
-                       WHERE entry_id = ?""",
-                    (fix_description, now, entry_id),
+                       WHERE entry_id = ? AND tenant = ?""",
+                    (fix_description, now, entry_id, self._tenant),
                 )
                 if cursor.rowcount == 0:
                     return None
@@ -456,15 +515,15 @@ class GlobalMemory:
     # ==================================================================
 
     async def get_entry(self, entry_id: str) -> KnowledgeEntry | None:
-        """按 ID 获取单条条目"""
+        """按 ID 获取单条条目 (限当前租户)"""
         conn = self._ensure_conn()
         cursor = await asyncio.to_thread(
             conn.execute,
             """SELECT entry_id, category, tool_name, content, source_task_id,
-                      source_agent_id, success_rate, resolved, resolution,
+                      source_agent_id, tenant, success_rate, resolved, resolution,
                       metadata, created_at, updated_at
-               FROM knowledge_entries WHERE entry_id = ?""",
-            (entry_id,),
+               FROM knowledge_entries WHERE entry_id = ? AND tenant = ?""",
+            (entry_id, self._tenant),
         )
         row = await asyncio.to_thread(cursor.fetchone)
         if row is None:
@@ -478,7 +537,7 @@ class GlobalMemory:
         unresolved_only: bool = False,
         limit: int = 100,
     ) -> list[KnowledgeEntry]:
-        """列出条目 (按更新时间倒序)
+        """列出条目 (按更新时间倒序, 限当前租户)
 
         Args:
             tool_name: 按工具名过滤 (None = 不过滤)
@@ -488,8 +547,8 @@ class GlobalMemory:
         """
         conn = self._ensure_conn()
 
-        conditions: list[str] = []
-        params: list[Any] = []
+        conditions: list[str] = ["tenant = ?"]
+        params: list[Any] = [self._tenant]
         if tool_name is not None:
             conditions.append("tool_name = ?")
             params.append(tool_name)
@@ -499,10 +558,10 @@ class GlobalMemory:
         if unresolved_only:
             conditions.append("resolved = 0")
 
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where = "WHERE " + " AND ".join(conditions)
         sql = (
             "SELECT entry_id, category, tool_name, content, source_task_id, "
-            "source_agent_id, success_rate, resolved, resolution, "
+            "source_agent_id, tenant, success_rate, resolved, resolution, "
             "metadata, created_at, updated_at "
             f"FROM knowledge_entries {where} "
             "ORDER BY updated_at DESC LIMIT ?"
@@ -573,28 +632,32 @@ class GlobalMemory:
         norm_query = normalize_vector(query_vec)
         fetch_k = top_k * 3
 
-        # 构建 SQL: 可选 tool_name 过滤通过 JOIN 实现
+        # 构建 SQL: 可选 tool_name 过滤通过 JOIN 实现; tenant 必须过滤
         if tool_name is not None:
             sql = """SELECT ke.entry_id, ke.category, ke.tool_name, ke.content,
-                            ke.source_task_id, ke.source_agent_id, ke.success_rate,
-                            ke.resolved, ke.resolution, ke.metadata,
+                            ke.source_task_id, ke.source_agent_id, ke.tenant,
+                            ke.success_rate, ke.resolved, ke.resolution, ke.metadata,
                             ke.created_at, ke.updated_at, v.distance
                      FROM vec_knowledge_idx v
                      JOIN knowledge_entries ke ON ke.id = v.rowid
                      WHERE v.embedding MATCH ? AND k = ?
                        AND ke.tool_name = ?
+                       AND ke.tenant = ?
                      ORDER BY v.distance"""
-            params: list[Any] = [vec_to_json(norm_query), fetch_k, tool_name]
+            params: list[Any] = [
+                vec_to_json(norm_query), fetch_k, tool_name, self._tenant,
+            ]
         else:
             sql = """SELECT ke.entry_id, ke.category, ke.tool_name, ke.content,
-                            ke.source_task_id, ke.source_agent_id, ke.success_rate,
-                            ke.resolved, ke.resolution, ke.metadata,
+                            ke.source_task_id, ke.source_agent_id, ke.tenant,
+                            ke.success_rate, ke.resolved, ke.resolution, ke.metadata,
                             ke.created_at, ke.updated_at, v.distance
                      FROM vec_knowledge_idx v
                      JOIN knowledge_entries ke ON ke.id = v.rowid
                      WHERE v.embedding MATCH ? AND k = ?
+                       AND ke.tenant = ?
                      ORDER BY v.distance"""
-            params = [vec_to_json(norm_query), fetch_k]
+            params = [vec_to_json(norm_query), fetch_k, self._tenant]
 
         def _search():
             return conn.execute(sql, params).fetchall()
@@ -721,27 +784,31 @@ class GlobalMemory:
         def _delete():
             cursor = conn.cursor()
             try:
-                # 获取 id 以便删除 vec0 行
+                # 校验条目归属当前租户 (不存在则不动任何数据)
+                row = cursor.execute(
+                    "SELECT id FROM knowledge_entries "
+                    "WHERE entry_id = ? AND tenant = ?",
+                    (entry_id, self._tenant),
+                ).fetchone()
+                if row is None:
+                    return False
+                # 删除 vec0 行
                 if self._vec_available:
-                    row = cursor.execute(
-                        "SELECT id FROM knowledge_entries WHERE entry_id = ?",
-                        (entry_id,),
-                    ).fetchone()
-                    if row:
-                        cursor.execute(
-                            "DELETE FROM vec_knowledge_idx WHERE rowid = ?",
-                            (row[0],),
-                        )
+                    cursor.execute(
+                        "DELETE FROM vec_knowledge_idx WHERE rowid = ?",
+                        (row[0],),
+                    )
                 # 删除降级表
                 cursor.execute(
                     "DELETE FROM knowledge_vectors WHERE entry_id = ?", (entry_id,),
                 )
                 cursor.execute(
-                    "DELETE FROM knowledge_entries WHERE entry_id = ?", (entry_id,),
+                    "DELETE FROM knowledge_entries "
+                    "WHERE entry_id = ? AND tenant = ?",
+                    (entry_id, self._tenant),
                 )
-                deleted = cursor.rowcount > 0
                 conn.commit()
-                return deleted
+                return True
             except Exception:
                 conn.rollback()
                 raise
@@ -758,21 +825,30 @@ class GlobalMemory:
 
         def _stats():
             cursor = conn.execute(
-                "SELECT COUNT(*), SUM(resolved) FROM knowledge_entries",
+                "SELECT COUNT(*), SUM(resolved) FROM knowledge_entries "
+                "WHERE tenant = ?",
+                (self._tenant,),
             )
             total, resolved = cursor.fetchone()
             if self._vec_available:
                 (vec_count,) = conn.execute(
-                    "SELECT COUNT(*) FROM vec_knowledge_idx",
+                    "SELECT COUNT(*) FROM vec_knowledge_idx v "
+                    "JOIN knowledge_entries ke ON ke.id = v.rowid "
+                    "WHERE ke.tenant = ?",
+                    (self._tenant,),
                 ).fetchone()
             else:
                 (vec_count,) = conn.execute(
-                    "SELECT COUNT(*) FROM knowledge_vectors",
+                    "SELECT COUNT(*) FROM knowledge_vectors kv "
+                    "JOIN knowledge_entries ke ON ke.entry_id = kv.entry_id "
+                    "WHERE ke.tenant = ?",
+                    (self._tenant,),
                 ).fetchone()
             cursor = conn.execute(
                 "SELECT tool_name, COUNT(*) FROM knowledge_entries "
-                "WHERE tool_name != '' GROUP BY tool_name "
+                "WHERE tool_name != '' AND tenant = ? GROUP BY tool_name "
                 "ORDER BY COUNT(*) DESC LIMIT 10",
+                (self._tenant,),
             )
             top_tools = cursor.fetchall()
             return {
@@ -793,7 +869,7 @@ class GlobalMemory:
         """SQLite 行 → KnowledgeEntry"""
         (
             entry_id, category, tool_name, content, source_task_id,
-            source_agent_id, success_rate, resolved, resolution,
+            source_agent_id, tenant, success_rate, resolved, resolution,
             metadata_str, created_at, updated_at,
         ) = row
         return KnowledgeEntry(
@@ -803,6 +879,7 @@ class GlobalMemory:
             content=content,
             source_task_id=source_task_id,
             source_agent_id=source_agent_id,
+            tenant=tenant or "default",
             success_rate=success_rate,
             resolved=bool(resolved),
             resolution=resolution,
@@ -812,7 +889,10 @@ class GlobalMemory:
         )
 
     def __repr__(self) -> str:
-        return f"<GlobalMemory db={self._db_path!r} embedded={self._embedding_client is not None}>"
+        return (
+            f"<GlobalMemory db={self._db_path!r} tenant={self._tenant!r} "
+            f"embedded={self._embedding_client is not None}>"
+        )
 
 
 __all__ = ["GlobalMemory"]

@@ -80,6 +80,8 @@ class MemoryManager:
         config: 策略配置参数
         llm_call: LLM 调用函数 (summary / lstm 策略使用)
         persistence_backend: Session 持久化后端 (可选)
+        tenant: 租户标识 (多租户隔离, 默认 "default")。
+            持久化写入自动归属该租户，恢复最近会话时仅查找同租户。
     """
 
     def __init__(
@@ -89,9 +91,11 @@ class MemoryManager:
         config: dict[str, Any] | None = None,
         llm_call: LLMCallFn | None = None,
         persistence_backend: PersistenceBackend | None = None,
+        tenant: str = "default",
     ) -> None:
         self._agent_id = agent_id
         self._persistence = persistence_backend
+        self._tenant = tenant or "default"
         self._current_session_id: str = ""
 
         if isinstance(strategy, MemoryStrategy):
@@ -121,6 +125,11 @@ class MemoryManager:
     @property
     def agent_id(self) -> str:
         return self._agent_id
+
+    @property
+    def tenant(self) -> str:
+        """当前租户标识 (多租户隔离)"""
+        return self._tenant
 
     @property
     def persistence(self) -> PersistenceBackend | None:
@@ -266,8 +275,10 @@ class MemoryManager:
                 return messages
             return None
 
-        # 自动恢复最近的 session
-        latest = await self._persistence.get_latest_session(self._agent_id)
+        # 自动恢复最近的 session (限当前租户)
+        latest = await self._persistence.get_latest_session(
+            self._agent_id, tenant=self._tenant,
+        )
         if latest is None:
             return None
 
@@ -289,7 +300,9 @@ class MemoryManager:
         sid = session_id or self._current_session_id
         if not sid:
             sid = self.start_session()
-        await self._persistence.save_session(sid, self._agent_id, messages)
+        await self._persistence.save_session(
+            sid, self._agent_id, messages, tenant=self._tenant,
+        )
 
     async def _save_current_session(self) -> None:
         """保存当前策略中的消息到持久化后端"""
@@ -298,6 +311,7 @@ class MemoryManager:
         messages = await self._strategy.get_context()
         await self._persistence.save_session(
             self._current_session_id, self._agent_id, messages,
+            tenant=self._tenant,
         )
 
     async def close(self) -> None:

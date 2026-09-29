@@ -40,6 +40,7 @@ class KnowledgeEntry(BaseModel):
         embedding: content 的语义向量 (None = 未向量化)
         source_task_id: 来源任务 ID
         source_agent_id: 来源 Agent ID
+        tenant: 租户标识 (多租户隔离, 默认 "default")
         success_rate: 关联的工具调用成功率 (0.0 ~ 1.0)
         resolved: 是否已被修复 (仅 bug 类经验有意义)
         resolution: 修复说明 (resolved=True 时填写)
@@ -55,6 +56,7 @@ class KnowledgeEntry(BaseModel):
     embedding: list[float] | None = None
     source_task_id: str = ""
     source_agent_id: str = ""
+    tenant: str = "default"
     success_rate: float = 0.0
     resolved: bool = False
     resolution: str = ""
