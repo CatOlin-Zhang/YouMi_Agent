@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from youmi.core.tool import ToolDefinition
+from youmi.core.tool import RiskLevel, ToolDefinition
 
 
 class ToolContextTier(str, Enum):
@@ -49,6 +49,10 @@ class ToolEntry(BaseModel):
         tier: 当前上下文状态
         last_used_turn: 上次使用的对话轮次 (-1 = 从未使用)
         use_count: 总使用次数
+        risk_level: 风险级别 (与 definition.risk_level 同步, 便于召回阶段直接读取)
+        required_permissions: 调用所需权限 (与 definition 同步)
+        lineage_id: 版本链标识 (同一名工具的全部版本共享, 默认 = tool_name)
+        summary_l2: 摘要的摘要 (L2 薄层初筛索引文本, ≤30 字; 空 = 未生成)
     """
 
     tool_name: str = Field(description="工具名称 (唯一标识)")
@@ -63,6 +67,22 @@ class ToolEntry(BaseModel):
     use_count: int = Field(default=0, description="总使用次数")
     version: str = Field(default="0.0.1", description="工具版本号")
     language: str = Field(default="python", description="工具实现语言")
+    risk_level: str = Field(
+        default=RiskLevel.LOW,
+        description="风险级别 (low/medium/high/critical)",
+    )
+    required_permissions: list[str] = Field(
+        default_factory=list,
+        description="调用所需权限标识 (空=无门槛)",
+    )
+    lineage_id: str = Field(
+        default="",
+        description="版本链标识 (同名工具全部版本共享, 空 = 尚未分配)",
+    )
+    summary_l2: str = Field(
+        default="",
+        description="摘要的摘要 (L2 薄层初筛索引文本, 空 = 未生成)",
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -75,9 +95,17 @@ class ToolSearchResult(BaseModel):
         definition: 工具定义 (可选, 取决于调用方)
         score: 相似度分数 (0~1)
         summary: 工具摘要
+        risk_level: 风险级别 (召回阶段即可见, 供 AuditGate/锥形裁剪使用)
+        required_permissions: 调用所需权限标识
+        lineage_id: 版本链标识 (供 GitLineageGuard 去重)
     """
 
     tool_name: str
     definition: ToolDefinition | None = None
     score: float = Field(ge=0.0, le=1.0, description="相似度分数")
     summary: str = ""
+    risk_level: str = Field(default=RiskLevel.LOW, description="风险级别")
+    required_permissions: list[str] = Field(
+        default_factory=list, description="调用所需权限标识",
+    )
+    lineage_id: str = Field(default="", description="版本链标识")

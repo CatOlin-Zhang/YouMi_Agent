@@ -42,6 +42,37 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 风险级别常量
+# ---------------------------------------------------------------------------
+
+class RiskLevel:
+    """工具风险级别常量 (模块级, 同 protocol.py 错误码风格)
+
+    因 Pydantic BaseModel 不支持类属性常量，风险级别用普通类的
+    字符串常量表示，ToolDefinition.risk_level 存储对应字符串。
+    """
+
+    LOW = "low"            # 只读/无副作用，无需审批
+    MEDIUM = "medium"      # 可逆的写操作
+    HIGH = "high"          # 不可逆或外部可见的操作
+    CRITICAL = "critical"  # 危险操作，召回即需人工审批
+
+
+# 风险级别 → 排序权重 (数值越大风险越高, 用于 SQL/Python 层的锥形裁剪)
+RISK_ORDER: dict[str, int] = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.CRITICAL: 3,
+}
+
+
+def risk_rank(level: str) -> int:
+    """风险级别 → 排序权重 (未知级别按 low 处理)"""
+    return RISK_ORDER.get(level, 0)
+
+
+# ---------------------------------------------------------------------------
 # 工具定义
 # ---------------------------------------------------------------------------
 
@@ -72,6 +103,14 @@ class ToolDefinition(BaseModel):
     version: str = Field(default="0.0.1", description="语义化版本号")
     language: str = Field(default="python", description="工具实现语言")
     runtime: str = Field(default="python", description="运行时标识")
+    risk_level: str = Field(
+        default=RiskLevel.LOW,
+        description="风险级别 (low/medium/high/critical), 见 RiskLevel 常量",
+    )
+    required_permissions: list[str] = Field(
+        default_factory=list,
+        description="调用所需权限标识 (如 ['fs:write', 'net:http'], 空=无门槛)",
+    )
 
     def to_openai_function_schema(self) -> dict[str, Any]:
         """生成 OpenAI function calling 的 tool 定义"""
@@ -282,7 +321,7 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 class ToolVersion(BaseModel):
-    """工具版本记录 — 存储在 ToolStore 中的版本链条目
+    """工具版本记录 — 存储在 ToolStore 中的版本树节点
 
     版本号格式为语义化版本 (semver): major.minor.patch
     - patch: bug 修复，不改版本号 (通过 changelog 记录)
@@ -295,6 +334,10 @@ class ToolVersion(BaseModel):
         definition_json: ToolDefinition 的 JSON 序列化
         created_at: 创建时间 ISO 格式
         changelog: 版本变更说明
+        branch: 所属分支 (Git 版本树; 默认 "main")
+        is_head: 是否为该分支当前 head
+        diff_patch: 与 parent 的结构化 diff (added/removed/changed
+            三段 JSON, 见 youmi.mcp.tool_store._dict_diff)
     """
 
     version: str
@@ -302,6 +345,9 @@ class ToolVersion(BaseModel):
     definition_json: str = ""
     created_at: str = ""
     changelog: str = ""
+    branch: str = "main"
+    is_head: bool = False
+    diff_patch: str = ""
 
 
 def bump_version(current: str, bump_type: str = "patch") -> str:

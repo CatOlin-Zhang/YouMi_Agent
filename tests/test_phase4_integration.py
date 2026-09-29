@@ -346,7 +346,7 @@ class TestSearchAndConfirm:
         bridge.reject_search_result("tool_a")
         bridge.reject_search_result("tool_b")
 
-        bridge.confirm_search_result("tool_c")
+        await bridge.confirm_search_result("tool_c")
         assert len(bridge._rejected_tools) == 0
 
     @pytest.mark.asyncio

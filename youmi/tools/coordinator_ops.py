@@ -231,7 +231,7 @@ async def approve_tool_request(master: MasterAgent, **kwargs: Any) -> str:
     agent_id = kwargs.get("agent_id", "")
     tool_names = kwargs.get("tool_names") or []
 
-    ok = master.approve_tool_request(agent_id, tool_names)
+    ok = await master.approve_tool_request(agent_id, tool_names)
     logger.info("Tool approve_tool_request: agent=%s tools=%s → %s",
                 agent_id, tool_names, "approved" if ok else "failed")
 

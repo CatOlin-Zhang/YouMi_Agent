@@ -431,7 +431,7 @@ async def test_approve_deny_tool_request():
     master._pending_tool_requests[sub.agent_id] = ("数据库查询", "需要查询")
 
     # 批准
-    ok = master.approve_tool_request(sub.agent_id, ["db_query", "db_insert"])
+    ok = await master.approve_tool_request(sub.agent_id, ["db_query", "db_insert"])
     check("approve成功", ok is True)
 
     # 拒绝 (已经approve过所以pending已清除)
@@ -502,7 +502,7 @@ async def test_approve_updates_tool_bridge():
           "file_search" not in (sub._tool_bridge.allowed_tools or set()))
 
     # 批准 file_search
-    ok = master.approve_tool_request(sub.agent_id, ["file_search", "file_write"])
+    ok = await master.approve_tool_request(sub.agent_id, ["file_search", "file_write"])
     check("approve成功", ok is True)
 
     # 批准后: ToolBridge 应包含新工具

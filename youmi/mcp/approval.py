@@ -46,6 +46,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from youmi.core.tool import RiskLevel
+
 logger = logging.getLogger(__name__)
 
 
@@ -156,17 +158,27 @@ class ApprovalManager:
     # 审批评估
     # ==================================================================
 
-    def evaluate(self, agent_id: str, tool_name: str) -> ApprovalLevel:
+    def evaluate(
+        self,
+        agent_id: str,
+        tool_name: str,
+        risk_level: str | None = None,
+    ) -> ApprovalLevel:
         """评估工具申请的审批级别
 
-        规则:
+        规则 (优先级从高到低):
         1. 工具在 auto_approve_list 中 → AUTO
-        2. 工具在 sensitive_tools 中 → MANUAL
-        3. 其他 → MASTER
+        2. 工具在 sensitive_tools 外部名单中 → MANUAL
+        3. 工具自带风险位 risk_level == critical → MANUAL
+           (锥形检索时代码自带风险属性, 召回阶段即可判定,
+            无需外部名单覆盖)
+        4. 其他 → MASTER
 
         Args:
             agent_id: 申请的 Agent ID
             tool_name: 申请的工具名称
+            risk_level: 工具自带风险级别 (可选; 来自 ToolDefinition.risk_level,
+                使外部 sensitive_tools 名单降级为补充覆盖)
 
         Returns:
             ApprovalLevel
@@ -177,13 +189,21 @@ class ApprovalManager:
         if tool_name in self._sensitive_tools:
             return ApprovalLevel.MANUAL
 
+        if risk_level == RiskLevel.CRITICAL:
+            return ApprovalLevel.MANUAL
+
         return ApprovalLevel.MASTER
 
     # ==================================================================
     # 申请与审批
     # ==================================================================
 
-    def submit_request(self, agent_id: str, tool_name: str) -> ApprovalRecord:
+    def submit_request(
+        self,
+        agent_id: str,
+        tool_name: str,
+        risk_level: str | None = None,
+    ) -> ApprovalRecord:
         """提交工具申请
 
         自动评估审批级别:
@@ -193,11 +213,12 @@ class ApprovalManager:
         Args:
             agent_id: 申请的 Agent ID
             tool_name: 申请的工具名称
+            risk_level: 工具自带风险级别 (可选, 参与 evaluate 判定)
 
         Returns:
             ApprovalRecord 审批记录
         """
-        level = self.evaluate(agent_id, tool_name)
+        level = self.evaluate(agent_id, tool_name, risk_level=risk_level)
 
         record = ApprovalRecord(
             agent_id=agent_id,

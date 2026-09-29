@@ -201,13 +201,14 @@ class ToolApprovalMixin:
                 approval_mode = "master" if master_records else "auto"
 
         # ---- 将工具添加到 SubAgent 的 ToolBridge (structure.md §2 热更新时序) ----
+        # 召回确认闭环: 审批批准 = 确认合适 → 加载到上下文 (白名单 + HOT)
         if approved and matched_tools:
             record = self._sub_agents.get(requester_id)
             if record is not None:
                 bridge = record.agent._tool_bridge
                 for tn in matched_tools:
                     if bridge is not None:
-                        bridge.add_allowed_tool(tn)
+                        await bridge.confirm_search_result(tn)
                     # 同步更新 config.allowed_tools
                     current = list(record.agent.config.allowed_tools)
                     if tn not in current:
@@ -256,11 +257,14 @@ class ToolApprovalMixin:
         # 清理待处理队列
         self._pending_tool_requests.pop(requester_id, None)
 
-    def approve_tool_request(self, agent_id: str, tool_names: list[str]) -> bool:
+    async def approve_tool_request(self, agent_id: str, tool_names: list[str]) -> bool:
         """手动批准子 Agent 的工具申请
 
-        将工具添加到 SubAgent 的 ToolBridge 和 config.allowed_tools，
+        将工具加载到 SubAgent 的 ToolBridge 上下文和 config.allowed_tools，
         使下一轮 _think() 自动包含新工具 (structure.md §2 热更新时序)。
+
+        召回确认闭环: 人工批准 = 确认合适，经 confirm_search_result()
+        完成「白名单 + HOT + 使用记录」的完整加载链路。
 
         Args:
             agent_id: 子 Agent ID
@@ -273,11 +277,11 @@ class ToolApprovalMixin:
         if record is None:
             return False
 
-        # 1. 更新 ToolBridge (structure.md §2: add_allowed_tool 立即生效)
+        # 1. 加载到 ToolBridge 上下文（白名单 + HOT，下一轮立即生效）
         bridge = record.agent._tool_bridge
         if bridge is not None:
             for tn in tool_names:
-                bridge.add_allowed_tool(tn)
+                await bridge.confirm_search_result(tn)
 
         # 2. 同步更新 config.allowed_tools
         current = list(record.agent.config.allowed_tools)

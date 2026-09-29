@@ -6,10 +6,15 @@ ToolBridge — Agent 与 MCP Server 之间的桥梁
 2. 工具调用 — 通过 MCPClient 发送请求到 MCPServer
 3. Schema 生成 — 为 LLM function calling 提供 tools 格式
 4. 调用追踪 — 记录工具调用日志
-5. 召回确认闭环 — 搜索工具后确认/否决/扩大搜索
+5. 召回确认闭环 — 搜索→确认→加载/否决扩大搜索的自动闭环
+   (search_and_confirm + 可插拔确认策略，见 youmi/mcp/confirm.py)
 6. 上下文注入 — 为 SubAgent 注入指定工具到 HOT 状态
 7. 工具发现元工具 — search_new_tools（Vault 语义搜索 + 授权加载，
    Agent 工具不足时向 MCP 提需求，由其执行向量查询等步骤）
+8. 召回审计 — AuditGate 在确认后、加载 schema 前拦截
+   (权限 BLOCK / 风险 MANUAL，见 youmi/mcp/audit_gate.py)
+9. 版本链守卫 — GitLineageGuard: 同一 git 链路一次任务只命中一次
+   (已激活 lineage 不重复召回, load= 同链路返回复用提示)
 
 Agent 通过 ToolBridge 与 MCP 层交互，
 不再直接持有 ToolRegistry。
@@ -43,13 +48,21 @@ import json
 import logging
 from typing import Any
 
+from youmi.mcp.audit_gate import AuditGate
 from youmi.mcp.client import MCPClient
+from youmi.mcp.cone import ConeQuery, ConeRetriever
+from youmi.mcp.confirm import (
+    Confirmer,
+    auto_confirm,
+    call_confirmer,
+)
 from youmi.mcp.protocol import MCPToolInfo, MCPToolResult, ToolContext
+from youmi.mcp.models import ToolSearchResult
 
 # 延迟导入避免循环依赖
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from youmi.mcp.vault import ToolVault, ToolSearchResult
+    from youmi.mcp.vault import ToolVault
     from youmi.mcp.context import AgentToolContext
 
 logger = logging.getLogger(__name__)
@@ -140,6 +153,11 @@ class ToolBridge:
         allowed_tools: 授权的工具名称列表。空列表表示不限制。
         vault: ToolVault 实例 (可选, 启用工具发现模式)
         context: AgentToolContext 实例 (可选, 启用 Agent 侧上下文状态管理)
+        cone: ConeRetriever 锥形检索器 (可选; None 时从 vault/store 懒构造,
+            语义搜索将走锥形联合检索: 向量 ∩ tag ∩ 风险 ∩ 权限)
+        audit_gate: AuditGate 召回审计闸门 (可选; None = 直通 PASS 零摩擦默认)。
+            注入后在确认→加载 schema 之间拦截: 权限不满足 BLOCK 拒绝加载、
+            风险超阈值 MANUAL 提交待审队列 (见 youmi/mcp/audit_gate.py)
         search_meta_tool: 是否提供 search_new_tools 工具发现元工具 (默认 False)。
             启用后 to_openai_tools() 会附加该工具 schema（不受白名单限制），
             call_tool() 对其本地拦截执行：语义搜索（Vault 向量/关键词）→
@@ -153,6 +171,8 @@ class ToolBridge:
         allowed_tools: list[str] | None = None,
         vault: ToolVault | None = None,
         context: AgentToolContext | None = None,
+        cone: ConeRetriever | None = None,
+        audit_gate: AuditGate | None = None,
         search_meta_tool: bool = False,
     ) -> None:
         self._agent_id = agent_id
@@ -165,11 +185,19 @@ class ToolBridge:
         self._vault = vault
         # AgentToolContext 集成 (可选, 优先于 Vault 的 tier 状态)
         self._context = context
+        # ConeRetriever 锥形检索器 (可选, 懒构造)
+        self._cone = cone
+        # AuditGate 召回审计闸门 (可选; None = 直通 PASS, 零摩擦默认)
+        self._audit_gate = audit_gate
         # 召回确认闭环状态
         self._rejected_tools: set[str] = set()
+        # GitLineageGuard: 已激活版本链 (lineage_id → 已加载 tool_id)
+        self._active_lineages: dict[str, str] = {}
         # 召回确认闭环: 上次搜索词 (reject 模式自动重搜用) + 连续否决计数
         self._last_search_query: str = ""
         self._reject_count: int = 0
+        # 召回确认闭环: 确认策略 (None = 用 auto_confirm 自动接受)
+        self._confirmer: Confirmer | None = None
         # search_new_tools 元工具开关
         self._search_meta_tool = search_meta_tool
 
@@ -194,6 +222,59 @@ class ToolBridge:
     def context(self) -> AgentToolContext | None:
         """AgentToolContext 实例 (可选)"""
         return self._context
+
+    @property
+    def cone(self) -> ConeRetriever | None:
+        """ConeRetriever 锥形检索器 (可选, 未注入且无 vault 时为 None)"""
+        return self._get_cone()
+
+    @property
+    def audit_gate(self) -> AuditGate | None:
+        """AuditGate 召回审计闸门 (可选, None = 直通 PASS)"""
+        return self._audit_gate
+
+    def set_audit_gate(self, audit_gate: AuditGate | None) -> None:
+        """设置召回审计闸门 (None = 移除, 恢复直通)"""
+        self._audit_gate = audit_gate
+
+    def _get_cone(self) -> ConeRetriever | None:
+        """获取锥形检索器 — 注入优先, 否则从 vault/store 懒构造
+
+        懒构造原因: 构造时 vault 可能尚未注入 (attach_vault 后才有)，
+        attach_vault 会重置已懒构造的 cone 使其指向新 vault。
+        """
+        if self._cone is not None:
+            return self._cone
+        if self._vault is None:
+            return None
+        self._cone = ConeRetriever(vault=self._vault, store=self._vault.store)
+        return self._cone
+
+    def _cone_granted_permissions(self) -> set[str] | None:
+        """锥形权限边界 — allowed_tools 白名单从"事后过滤"升为"检索边界"
+
+        - 无限制 Agent (allowed_tools=None): 权限域不限制 (None)
+        - 受限 Agent: 权限域 = 白名单集合 (required_permissions
+          非空的工具需白名单覆盖其所需权限)
+        """
+        if self._allowed_tools is None:
+            return None
+        return set(self._allowed_tools)
+
+    def set_confirmer(self, confirmer: Confirmer | None) -> None:
+        """设置默认确认策略 (召回确认闭环)
+
+        Args:
+            confirmer: 确认判定者回调 (None = 恢复默认自动接受)。
+                可用 youmi.mcp.confirm.build_llm_confirmer() 构造
+                LLM 判定者，或传入自定义同步/异步回调。
+        """
+        self._confirmer = confirmer
+        logger.debug(
+            "ToolBridge[%s]: confirmer set to %s",
+            self._agent_id,
+            getattr(confirmer, "__class__", type(confirmer)).__name__ if confirmer else "auto_confirm",
+        )
 
     # ------------------------------------------------------------------
     # 工具调用
@@ -322,27 +403,39 @@ class ToolBridge:
         query: str,
         top_k: int = 5,
         min_score: float = 0.3,
+        tags: list[str] | None = None,
+        risk_ceiling: str = "critical",
     ) -> list[dict[str, Any]]:
-        """语义搜索工具 (仅 Vault 模式可用)
+        """锥形检索工具 (Vault/Store 模式可用)
 
-        Agent 生成对于工具功能的描述，向量匹配这些向量头拉取匹配度最高的。
+        语义方向 ∩ tag 边界 ∩ 风险边界 ∩ 权限边界 联合召回:
+        - 有 ToolStore: KNN 子查询 + tag/risk 联合 WHERE (一条 SQL)
+        - 仅 Vault: 内存召回 + Python 层锥形过滤
+        - 权限边界: allowed_tools 白名单 (受限 Agent 的候选需权限覆盖)
 
         Args:
             query: 自然语言查询 (如 "我需要一个能发送通知的工具")
             top_k: 返回结果数量
             min_score: 最低相似度阈值
+            tags: tag 边界 (命中任一 tag 才可召回, 仅 store 模式生效)
+            risk_ceiling: 风险上限 (高于此级别的工具不召回)
 
         Returns:
             搜索结果列表 [{"tool_name": ..., "score": ..., "summary": ...}]
         """
-        if self._vault is None:
+        cone = self._get_cone()
+        if cone is None:
             return []
 
-        results = await self._vault.search(query, top_k=top_k, min_score=min_score)
-
-        # 应用 allowed_tools 过滤
-        if self._allowed_tools is not None:
-            results = [r for r in results if r.tool_name in self._allowed_tools]
+        results = await cone.retrieve(ConeQuery(
+            query=query,
+            tags=tags,
+            risk_ceiling=risk_ceiling,
+            granted_permissions=self._cone_granted_permissions(),
+            exclude_lineages=self._active_lineage_excludes(),
+            top_k=top_k,
+            min_score=min_score,
+        ))
 
         return [
             {
@@ -433,6 +526,8 @@ class ToolBridge:
         from youmi.mcp.context import AgentToolContext
 
         self._vault = vault
+        # vault 变更后重置懒构造的锥形检索器, 使其指向新 vault/store
+        self._cone = None
         if self._context is None:
             essential = set(essential_names or set())
             if self._allowed_tools:
@@ -512,17 +607,22 @@ class ToolBridge:
 
         # 已否决的候选同样视为"不可见"，避免重复推荐
         exclude = self._visible_tool_names() | self._rejected_tools
-        candidates: list[dict[str, Any]] = []
 
-        # 路径 1: ToolVault 语义搜索（向量 → 关键词回退）
+        # 路径 1: 锥形检索（向量/SQL 锥形 → 关键词回退，均含权限边界）
         # 注: 挂载了 ToolStore 时 search 不做 tier 过滤，
         # 受限 Agent 也能发现 HOT 但未授权的工具
-        if self._vault is not None:
+        candidates: list[dict[str, Any]] = []
+        cone = self._get_cone()
+        if cone is not None:
             try:
-                results = await self._vault.search(
-                    query, top_k=top_k, min_score=0.2,
-                    exclude=exclude or None,
-                )
+                results = await cone.retrieve(ConeQuery(
+                    query=query,
+                    granted_permissions=self._cone_granted_permissions(),
+                    exclude_names=exclude,
+                    exclude_lineages=self._active_lineage_excludes(),
+                    top_k=top_k,
+                    min_score=0.2,
+                ))
                 candidates = [
                     {
                         "name": r.tool_name,
@@ -532,7 +632,7 @@ class ToolBridge:
                     for r in results
                 ]
             except Exception as exc:
-                logger.debug("ToolBridge[%s]: vault search failed: %s",
+                logger.debug("ToolBridge[%s]: cone search failed: %s",
                              self._agent_id, exc)
 
         # 路径 2: 回退 — MCPClient 关键词匹配
@@ -626,9 +726,31 @@ class ToolBridge:
             {"query": query}, _is_research=True,
         )
 
-    async def _load_discovered_tool(self, tool_name: str) -> MCPToolResult:
-        """加载发现的工具: 授权 + 提升为 HOT
+    def _audit_candidate(self, tool_name: str) -> ToolSearchResult:
+        """构造 AuditGate 检查用的候选对象
 
+        优先读取 Vault 条目 (携带 risk_level / required_permissions /
+        lineage_id); 无元数据时返回默认低风险候选 (gate 只能 PASS)。
+        """
+        if self._vault is not None:
+            entry = self._vault.get_entry(tool_name)
+            if entry is not None:
+                return ToolSearchResult(
+                    tool_name=tool_name,
+                    definition=entry.definition,
+                    score=1.0,
+                    summary=entry.summary,
+                    risk_level=entry.risk_level,
+                    required_permissions=list(entry.required_permissions),
+                    lineage_id=entry.lineage_id or tool_name,
+                )
+        return ToolSearchResult(tool_name=tool_name, score=1.0)
+
+    async def _load_discovered_tool(self, tool_name: str) -> MCPToolResult:
+        """加载发现的工具: 审计检查 + 授权 + 提升为 HOT
+
+        - AuditGate (若注入): 存在性校验后、加载 schema 前拦截 —
+          权限不满足 BLOCK 拒绝加载; 风险超阈值 MANUAL 提交待审
         - 受限 Agent: 自动加入白名单（自我授权，记录日志；
           正式审批流可后续接入 TOOL_REQUEST / ToolGuardian）
         - Vault 模式: 提升为 HOT 使 schema 立即可见
@@ -646,6 +768,43 @@ class ToolBridge:
                 f"工具 '{tool_name}' 不存在，请从候选列表中选择"
             )
 
+        # GitLineageGuard: 同 lineage 已激活 → 复用现有版本, 不重复加载
+        lineage = self._lineage_of(tool_name)
+        if lineage in self._active_lineages:
+            active_id = self._active_lineages[lineage]
+            logger.debug(
+                "ToolBridge[%s]: reuse active lineage '%s' (tool=%s)",
+                self._agent_id, lineage, active_id,
+            )
+            return MCPToolResult.success(json.dumps({
+                "reused": active_id,
+                "message": "同一工具链路已激活，复用现有版本",
+            }, ensure_ascii=False))
+
+        # AuditGate 检查: 加载 schema 前拦截 (权限 BLOCK / 风险 MANUAL)
+        if self._audit_gate is not None:
+            candidate = self._audit_candidate(tool_name)
+            audit = await self._audit_gate.check(
+                candidate, self._agent_id,
+                granted_permissions=self._cone_granted_permissions(),
+            )
+            if audit.blocked:
+                # 权限不满足: 拒绝加载并排除该候选 (后续搜索不再推荐)
+                self.reject_search_result(tool_name)
+                return MCPToolResult.failure(
+                    f"审计拦截: 工具 '{tool_name}' {audit.reason}"
+                )
+            if audit.manual:
+                # 风险超阈值: 提交人工审批, 暂不加载 schema
+                return MCPToolResult.success(json.dumps({
+                    "pending_approval": tool_name,
+                    "record_id": audit.record_id,
+                    "message": (
+                        f"工具 '{tool_name}' {audit.reason}，"
+                        "已提交待审批队列，审批通过后可再次 load 加载。"
+                    ),
+                }, ensure_ascii=False))
+
         # 授权: 加入白名单（受限 Agent）
         if self._allowed_tools is not None:
             self.add_allowed_tool(tool_name)
@@ -654,16 +813,9 @@ class ToolBridge:
                 self._agent_id, tool_name,
             )
 
-        # 上下文: 提升为 HOT（复用 load_tool 的 context/vault 优先级）
-        promoted = await self.load_tool(tool_name)
-        if self._context is not None:
-            self._context.record_usage(tool_name)
-        elif self._vault is not None:
-            self._vault.record_usage(tool_name)
-
-        # 确认语义: 加载成功即确认当前搜索会话，清理否决状态
-        self._rejected_tools.clear()
-        self._reject_count = 0
+        # 上下文: 提升为 HOT + 使用记录 + 清理否决状态（公共激活路径）
+        promoted = await self._activate_tool(tool_name)
+        self._reject_count = 0  # 加载成功即确认当前搜索会话
 
         return MCPToolResult.success(json.dumps({
             "loaded": tool_name,
@@ -707,77 +859,156 @@ class ToolBridge:
     async def search_and_confirm(
         self,
         query: str,
+        confirmer: Confirmer | None = None,
         max_retries: int = 3,
         top_k: int = 5,
         min_score: float = 0.3,
+        activate: bool = True,
     ) -> ToolSearchResult | None:
-        """搜索工具并确认闭环
+        """搜索工具并执行确认闭环 (召回确认闭环的自动执行入口)
 
-        流程:
-        1. 向量搜索返回 top-k
-        2. 取最佳候选返回给调用方
-        3. 调用方确认合适 → 自动加载到上下文并返回
-        4. 调用方确认不合适 → 排除该项，扩大搜索
-        5. max_retries 次后仍无合适结果 → 返回 None ("没有该功能的工具")
-
-        注意: 此方法自动执行第 1-2 步并返回最佳候选。
-        调用方可使用 confirm_search_result() / reject_search_result()
-        完成闭环，或直接使用返回结果。
+        每轮流程:
+        1. 搜索 top-k 候选 (排除已可见与已否决工具)
+        2. 逐候选交给确认者判定 (可插拔: 默认自动接受 / LLM 判定 / 人工回调)
+        3. 确认者接受 → AuditGate 审计检查 (加载 schema 前拦截;
+           BLOCK 视同否决继续下一候选, MANUAL 返回候选但不加载)
+           → 通过后加载到上下文 (白名单 + HOT + 使用记录) 并返回
+        4. 确认者否决 → 排除该候选继续看下一个
+        5. 一轮候选全部被否决 → 带着排除项自动扩大搜索进入下一轮
+        6. max_retries 轮后仍无合适候选 → 返回 None (“没有该功能的工具”)
 
         Args:
             query: 自然语言查询
-            max_retries: 最大重试次数
-            top_k: 每次搜索结果数
+            confirmer: 确认判定者 (None = 使用 set_confirmer() 设置的策略，
+                均未设置时自动接受)。见 youmi/mcp/confirm.py
+            max_retries: 最大搜索轮数 (每轮排除已否决项后重搜)
+            top_k: 每轮搜索结果数
             min_score: 最低相似度阈值
+            activate: 确认后是否立即加载到上下文。
+                False = 仅返回候选 (调用方走审批等流程后再调用
+                confirm_search_result() 完成加载)
 
         Returns:
-            最佳匹配的 ToolSearchResult，或 None (无匹配)
+            被确认的 ToolSearchResult，或 None (无匹配/轮数耗尽)
         """
         if self._vault is None:
             return None
 
-        for attempt in range(max_retries):
-            results = await self._vault.search(
-                query,
-                top_k=top_k,
-                min_score=min_score,
-                exclude=self._rejected_tools if self._rejected_tools else None,
-            )
+        confirmer = confirmer or self._confirmer or auto_confirm
+        rounds = max(1, int(max_retries))
 
-            # 应用 allowed_tools 过滤
-            if self._allowed_tools is not None:
-                results = [r for r in results if r.tool_name in self._allowed_tools]
+        cone = self._get_cone()
 
+        for attempt in range(rounds):
+            exclude = self._visible_tool_names() | self._rejected_tools
+            if cone is not None:
+                results = await cone.retrieve(ConeQuery(
+                    query=query,
+                    granted_permissions=self._cone_granted_permissions(),
+                    exclude_names=exclude,
+                    exclude_lineages=self._active_lineage_excludes(),
+                    top_k=top_k,
+                    min_score=min_score,
+                ))
+            else:
+                results = []
             if not results:
                 logger.info(
-                    "ToolBridge[%s]: search_and_confirm 第%d次无结果",
+                    "ToolBridge[%s]: search_and_confirm 第%d轮无结果",
                     self._agent_id, attempt + 1,
                 )
                 return None
 
-            # 返回最佳候选
-            best = results[0]
-            logger.debug(
-                "ToolBridge[%s]: search_and_confirm 候选 '%s' (score=%.3f, attempt=%d)",
-                self._agent_id, best.tool_name, best.score, attempt + 1,
-            )
-            return best
+            for candidate in results:
+                decision = await call_confirmer(confirmer, candidate, query)
+                if decision.confirmed:
+                    logger.debug(
+                        "ToolBridge[%s]: confirmed '%s' (score=%.3f, reason=%s)",
+                        self._agent_id, candidate.tool_name,
+                        candidate.score, decision.reason,
+                    )
+                    # AuditGate 检查: 确认后、加载 schema 前拦截
+                    if self._audit_gate is not None:
+                        audit = await self._audit_gate.check(
+                            candidate, self._agent_id,
+                            granted_permissions=self._cone_granted_permissions(),
+                        )
+                        if audit.blocked:
+                            # 视同否决: 排除该候选继续看下一个
+                            logger.info(
+                                "ToolBridge[%s]: '%s' blocked by audit gate "
+                                "(reason=%s)",
+                                self._agent_id, candidate.tool_name,
+                                audit.reason,
+                            )
+                            self.reject_search_result(candidate.tool_name)
+                            continue
+                        if audit.manual:
+                            # 待审批: 返回候选但不加载 schema
+                            # (等价 activate=False 行为)
+                            logger.info(
+                                "ToolBridge[%s]: '%s' pending manual approval "
+                                "(record=%s)",
+                                self._agent_id, candidate.tool_name,
+                                audit.record_id or "-",
+                            )
+                            self._rejected_tools.clear()
+                            return candidate
+                    if activate:
+                        await self.confirm_search_result(candidate.tool_name)
+                    else:
+                        self._rejected_tools.clear()
+                    return candidate
+                logger.debug(
+                    "ToolBridge[%s]: rejected '%s' by confirmer (reason=%s)",
+                    self._agent_id, candidate.tool_name, decision.reason,
+                )
+                self.reject_search_result(candidate.tool_name)
 
+        logger.info(
+            "ToolBridge[%s]: search_and_confirm %d 轮无合适候选 (query=%r)",
+            self._agent_id, rounds, query[:60],
+        )
         return None
 
-    def confirm_search_result(self, tool_name: str) -> None:
-        """确认搜索结果合适，加载到上下文并清理拒绝列表
+    async def confirm_search_result(self, tool_name: str) -> bool:
+        """确认召回结果合适 — 加载到上下文并清理否决列表
+
+        完整执行「合适」分支 (召回确认闭环):
+        1. 授权: 受限 Agent 加入白名单
+        2. 加载: 提升为 HOT (load_tool)
+        3. 记录: record_usage 防止下一轮 LRU 误回收
+        4. 清理: 清空已否决列表 (本次搜索会话结束)
 
         Args:
             tool_name: 确认的工具名称
+
+        Returns:
+            是否成功提升为 HOT
         """
-        # 添加到权限白名单
-        self.add_allowed_tool(tool_name)
+        promoted = await self._activate_tool(tool_name)
+        logger.debug(
+            "ToolBridge[%s]: confirmed tool '%s' (promoted=%s)",
+            self._agent_id, tool_name, promoted,
+        )
+        return promoted
 
-        # 清理拒绝列表
+    async def _activate_tool(self, tool_name: str) -> bool:
+        """加载工具到上下文 — 召回确认/工具发现共用的激活路径
+
+        授权 (白名单) + 提升 HOT + 使用记录 + 清空否决列表。
+        """
+        if self._allowed_tools is not None:
+            self.add_allowed_tool(tool_name)
+        promoted = await self.load_tool(tool_name)
+        if self._context is not None:
+            self._context.record_usage(tool_name)
+        elif self._vault is not None:
+            self._vault.record_usage(tool_name)
         self._rejected_tools.clear()
-
-        logger.debug("ToolBridge[%s]: confirmed tool '%s'", self._agent_id, tool_name)
+        # GitLineageGuard: 登记已激活 lineage (同链路后续版本不重复召回)
+        self._register_lineage(tool_name)
+        return promoted
 
     def reject_search_result(self, tool_name: str) -> None:
         """否决搜索结果，将其加入排除列表
@@ -796,6 +1027,47 @@ class ToolBridge:
     def reset_rejected(self) -> None:
         """重置已否决工具列表 (新查询时调用)"""
         self._rejected_tools.clear()
+
+    # ------------------------------------------------------------------
+    # GitLineageGuard (版本链去重复用)
+    # ------------------------------------------------------------------
+
+    def _lineage_of(self, tool_name: str) -> str:
+        """获取工具的版本链标识 (vault entry 优先, 默认 = tool_name)"""
+        if self._vault is not None:
+            entry = self._vault.get_entry(tool_name)
+            if entry is not None and entry.lineage_id:
+                return entry.lineage_id
+        return tool_name
+
+    def _register_lineage(self, tool_name: str) -> str:
+        """登记已激活工具的版本链 (lineage_id → 已加载 tool_id)
+
+        Returns:
+            登记的 lineage_id
+        """
+        lineage = self._lineage_of(tool_name)
+        tool_id = tool_name
+        if self._vault is not None:
+            entry = self._vault.get_entry(tool_name)
+            if entry is not None:
+                tool_id = f"{entry.tool_name}@{entry.version}"
+        self._active_lineages[lineage] = tool_id
+        return lineage
+
+    def _active_lineage_excludes(self) -> set[str] | None:
+        """GitLineageGuard 排除集: 已激活 lineage (空时 None 不限制)"""
+        return set(self._active_lineages) or None
+
+    @property
+    def active_lineages(self) -> dict[str, str]:
+        """已激活版本链视图 (lineage_id → 已加载 tool_id)"""
+        return dict(self._active_lineages)
+
+    def reset_lineages(self) -> None:
+        """清空已激活版本链 (任务边界: 新 task 开始时调用)"""
+        self._active_lineages.clear()
+        logger.debug("ToolBridge[%s]: active lineages reset", self._agent_id)
 
     # ------------------------------------------------------------------
     # 上下文注入 (MCP_Agent 功能)

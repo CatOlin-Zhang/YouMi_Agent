@@ -122,6 +122,21 @@ class ToolVault:
                 "definition": entry.definition.model_copy(update={"version": entry.version}),
             })
 
+        # 同步锥形元数据 (definition 为权威源; lineage_id 默认 = tool_name)
+        # 保证内存搜索路径返回的 ToolSearchResult 携带风险位/权限位/lineage
+        updates: dict[str, Any] = {}
+        if entry.risk_level != entry.definition.risk_level:
+            updates["risk_level"] = entry.definition.risk_level
+        if entry.required_permissions != entry.definition.required_permissions:
+            updates["required_permissions"] = list(entry.definition.required_permissions)
+        if not entry.lineage_id:
+            updates["lineage_id"] = entry.tool_name
+        # L2 摘要 (摘要的摘要): 空时用启发式截断补齐 (与 SummaryGenerator 一致)
+        if not entry.summary_l2:
+            updates["summary_l2"] = entry.summary[:30]
+        if updates:
+            entry = entry.model_copy(update=updates)
+
         self._entries[entry.tool_name] = entry
 
         # 自动生成向量 (如有 embedding client 且无现有向量)
@@ -251,6 +266,9 @@ class ToolVault:
                     definition=entry.definition,
                     score=score,
                     summary=entry.summary,
+                    risk_level=entry.risk_level,
+                    required_permissions=list(entry.required_permissions),
+                    lineage_id=entry.lineage_id or entry.tool_name,
                 ))
 
         results.sort(key=lambda r: r.score, reverse=True)
@@ -288,6 +306,9 @@ class ToolVault:
                     definition=entry.definition,
                     score=min(score, 1.0),
                     summary=entry.summary,
+                    risk_level=entry.risk_level,
+                    required_permissions=list(entry.required_permissions),
+                    lineage_id=entry.lineage_id or entry.tool_name,
                 ))
 
         scored.sort(key=lambda r: r.score, reverse=True)
@@ -514,9 +535,10 @@ class ToolVault:
         return schemas
 
     def to_warm_summaries(self) -> list[dict[str, str]]:
-        """生成所有温态工具的摘要列表
+        """生成所有温态工具的分层摘要列表
 
-        格式: [{"name": "tool_name", "description": "一句话摘要"}]
+        格式: [{"name": ..., "description": L1 摘要,
+                "summary_l2": L2 摘要(摘要的摘要)}]
         Agent 可将此列表注入 system prompt，让 LLM 知道还有哪些工具可用。
         """
         summaries: list[dict[str, str]] = []
@@ -525,6 +547,7 @@ class ToolVault:
                 summaries.append({
                     "name": entry.tool_name,
                     "description": entry.summary,
+                    "summary_l2": entry.summary_l2 or entry.summary[:30],
                 })
         return summaries
 
