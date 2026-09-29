@@ -1,7 +1,7 @@
 # Agent 基类与 ReAct 运行时详解
 
 > 对应代码：`youmi/core/agent.py`（约 1700 行）及其协作模块
-> `youmi/core/hooks.py`、`youmi/core/plugin.py`、`youmi/core/prompt.py`、`youmi/memory/compaction.py`、`youmi/scheduler/__init__.py`
+> `youmi/core/hooks.py`、`youmi/core/plugin.py`、`youmi/core/prompt.py`、`youmi/core/tool_executor.py`、`youmi/core/resilience.py`、`youmi/memory/compaction.py`、`youmi/scheduler/__init__.py`
 
 Agent 是框架的核心执行实体。所有 Agent（包括 MasterAgent、ToolGuardianAgent、普通 SubAgent）都继承自该基类，通过组合而非继承获得记忆、工具、消息、Hook、插件、调度等能力。
 
@@ -57,6 +57,8 @@ class AgentStatus(str, Enum):
 - **工具热更新兼容**：`_think()` 每轮重新调用 `to_openai_tools()` 获取工具 schema，运行期动态授权的工具下一轮即对 LLM 可见，无需中断循环。
 - **工具不足兜底**：Agent 自动携带 `search_new_tools` 兜底工具，ReAct 循环中工具不够用时主动向 MCP 层发起检索（ToolVault 向量搜索，无 Vault 时回退 ToolRegistry 关键词匹配）。
 - **上下文压缩**：每轮对话后经 `ContextCompactor.maybe_compact()` 检查 token 预算，超限时将早期消息压缩为摘要（详见记忆系统文档）。
+- **调用治理（M1）**：LLM 调用接入重试退避 + 熔断器（`youmi/core/resilience.py`）；工具调用经 `ToolExecutor` 治理层统一超时（`YOUMI_TOOL_TIMEOUT_S` 环境变量）、熔断与审计，熔断拒绝以失败 `ActionResult` 返回，**不打断 ReAct 循环**（详见 [Infra_Introduction.md](Infra_Introduction.md)）。
+- **工具上下文轮次自动推进**：`_advance_tool_context()`（advance_turn + recycle + 刷新 WARM 层）在 run / chat_turn / chat_turn_stream 三路每轮自动调用，闲置工具自动降级回收。
 
 ---
 
@@ -191,3 +193,4 @@ class AgentConfig:
 - [MCP_Introduction.md](MCP_Introduction.md) — 工具调用链路与权限
 - [Message_Introduction.md](Message_Introduction.md) — 消息总线协议
 - [Memory_Introduction.md](Memory_Introduction.md) — 记忆策略与持久化
+- [Infra_Introduction.md](Infra_Introduction.md) — 可靠性/可观测性/安全治理基础设施

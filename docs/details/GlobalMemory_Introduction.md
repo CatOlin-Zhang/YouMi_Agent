@@ -83,11 +83,19 @@ class ToolKnowledge(BaseModel):
 两张 SQLite 表（默认路径 `.youmi_knowledge.db`）：
 
 ```sql
-knowledge_entries   -- 主表：12 列含 resolved/resolution
+knowledge_entries   -- 主表：13 列含 tenant/resolved/resolution
 knowledge_vectors   -- 向量索引：entry_id + tool_name + embedding_json
 ```
 
-索引：`idx_knowledge_tool`（按工具名）、`idx_knowledge_category`、`idx_knowledge_updated`。
+索引：`idx_knowledge_tool`（按工具名）、`idx_knowledge_category`、`idx_knowledge_updated`、`idx_knowledge_tenant`（按租户）。
+
+### 多租户隔离（P1）
+
+每个 `GlobalMemory` 实例绑定一个 tenant（构造参数 `tenant="acme"`，默认 `default`）：
+
+- 写入自动归属该 tenant；查询（search / get_tool_knowledge / list_entries / stats）仅返回同 tenant 数据；
+- `clone_for_tenant(tenant)` 共享同一数据库连接获取其他租户视图（网关按租户懒创建 MasterAgent 时使用）；
+- 旧库在 `initialize()` 时自动补 tenant 列（旧数据归 `default`），无破坏性迁移。
 
 ### 主要接口
 

@@ -19,6 +19,7 @@ class WorkflowMessage(BaseModel):
     msg_type: WorkflowMessageType   # 消息类型（见下表）
     content: str                    # 消息主体
     metadata: dict                  # 扩展元数据（任务 ID、trace_id 等）
+    tenant: str = "default"        # 租户标识，Broker 据此阻断跨租户投递
     timestamp: datetime             # 创建时间
 ```
 
@@ -37,7 +38,7 @@ class WorkflowMessage(BaseModel):
 
 ### BusEnvelope（传输信封）
 
-WebSocket 远程通信时的外层封装，包含序列化后的 WorkflowMessage 与投递元数据（retry_count、delivered_at 等）。
+WebSocket 远程通信时的外层封装，包含序列化后的 WorkflowMessage 与投递元数据（retry_count、delivered_at 等）。`BusEnvelope.subscribe(agent_id, workflow_id, token)` 工厂方法构造订阅信封 — 服务端启用认证时需携带 token（M1）。
 
 ---
 
@@ -157,22 +158,38 @@ SubAgent 收到 TOOL_RESPONSE
 
 ---
 
-## 7. 工作流隔离设计
+## 7. 总线认证与多租户（M1/P1）
+
+### 总线认证
+
+认证由 `YOUMI_AUTH_TOKEN` / `YOUMI_AUTH_TOKENS` 环境变量配置启用（未配置时零摩擦放行，见 `youmi/security/auth.py`）：
+
+- **BusServer**：订阅信封携带 token，服务端校验失败时回发 error envelope 并以 **4401** 关闭连接，同时写入审计日志；
+- **BusClient**：构造时传入 `token="<secret>"`，认证被拒（`SubscribeRejectedError` 硬拒绝）不重连，避免无效重试。
+
+### 多租户隔离
+
+`InProcessBroker.subscribe(agent_id, workflow_id, tenant)` 登记每个 Agent 的租户；投递时跨租户消息被阻断并记录日志（`Cross-tenant message blocked`）。`workflow_id` 隔离工作流，`tenant` 在工作流之上再隔离租户（网关场景下认证主体携带 tenant 自动传播，详见 [Infra_Introduction.md](Infra_Introduction.md)）。
+
+---
+
+## 8. 工作流隔离设计
 
 每次 `create_workflow()` 生成唯一 `workflow_id`。所有消息携带 `workflow_id` 字段，Broker 路由时只投递给同 `workflow_id` 下订阅的 Agent。`reset_for_new_task()` 触发新工作流 ID，物理隔离不同会话的消息队列。
 
 ---
 
-## 8. GUI 总线集成
+## 9. GUI 总线集成
 
 `EngineBridge.init()` 创建 `InProcessBroker`，Master 与所有子 Agent 均通过 `_patch_create_sub_agent()` 自动 `connect_bus()`，无需手动调用。
 
-GUI 监听 Broker 回调（观察者模式）以捕获 Agent 间通信，尚未实现全量转发到前端（`total_bus_events` 转发为 `agent_message` WebSocket 事件列为待实现项）。
+Agent 间通信通过 `GUIHookBridge` 的 `MESSAGE_SENDING` 钩子捕获并渲染为前端协作提示气泡（工具卡片/文本气泡/工作流完成检测均由钩子驱动，见 [GUI_Introduction.md](GUI_Introduction.md)）。
 
 ---
 
-## 9. 相关文档
+## 10. 相关文档
 
 - [Agent_Introduction.md](Agent_Introduction.md) — Agent 收发消息方法
 - [Master_Introduction.md](Master_Introduction.md) — 工具申请审批的 Master 侧处理
 - [GUI_Introduction.md](GUI_Introduction.md) — EngineBridge 与总线的 GUI 集成
+- [Infra_Introduction.md](Infra_Introduction.md) — 认证与多租户基础设施

@@ -1,9 +1,9 @@
 # GUI 层详解
 
 > 对应代码：`gui/`（server.py / engine/ / hub/ / persistence/ / static/）
-> 启动命令：`python -m gui`（默认端口 8000）
+> 启动命令：`python -m gui`（默认端口 8766）
 
-GUI 采用「群聊式 Web 应用」设计（QQ/微信隐喻），基于 **aiohttp** 提供 REST + WebSocket 双模式接口，通过 `EngineBridge` 桥接 YouMi 引擎，全程不修改核心 `youmi/` 代码。
+GUI 采用「群聊式 Web 应用」设计（QQ/微信隐喻），基于 **aiohttp** 提供 REST + WebSocket 双模式接口，通过 `EngineBridge` 桥接 YouMi 引擎，全程不修改核心 `youmi/` 代码。支持配置启用式认证中间件（M1）。
 
 ---
 
@@ -12,16 +12,17 @@ GUI 采用「群聊式 Web 应用」设计（QQ/微信隐喻），基于 **aioht
 ```
 浏览器（gui/static/）
   HTML/CSS/JS  三栏布局 · 气泡聊天 · 工具卡片
-       │ WebSocket + REST
+       │ WebSocket + REST（可选 Bearer token 认证）
 gui/server.py  (aiohttp)
+  ├─ 认证中间件    (YOUMI_AUTH_* 配置启用式，保护 /api/* 与 /ws)
   ├─ 静态资源服务 (GET /static/*, GET /)
-  ├─ REST 端点   (/api/agents / /api/sessions / /api/tools 等)
+  ├─ REST 端点   (/api/agents / /api/sessions / /api/tools / /api/audit / /healthz)
   ├─ WebSocket   (WS /ws  事件流)
   └─ 引擎持有器  (单例 EngineBridge)
        │ 进程内调用
 gui/engine/
   ├─ bridge.py      EngineBridge  引擎适配器
-  ├─ hook_bridge.py GUIHooks      挂载 HookRegistry
+  ├─ hook_bridge.py GUIHookBridge 挂载 HookRegistry
   ├─ mcp_service.py MCPService    MCP/Vault/ToolStore 一体化
   ├─ models.py      Session/AgentCard/MessageRecord 数据模型
   └─ tracker.py     WorkflowTracker 工作流状态追踪
@@ -97,17 +98,18 @@ await bridge.init()
 
 ---
 
-## 4. GUIHooks（gui/engine/hook_bridge.py）
+## 4. GUIHookBridge（gui/engine/hook_bridge.py）
 
-通过 Agent 的 `HookRegistry` 注入三类监听处理器，无需改动引擎代码：
+通过 Agent 的 `HookRegistry` 注入四类监听处理器，无需改动引擎代码：
 
 | Hook 类型 | 触发时机 | GUI 动作 |
 |-----------|---------|---------|
-| `MESSAGE_SENDING` | Agent 发送总线消息前 | 推送 `agent_chunk` / `agent_message_end` 事件 |
-| `BEFORE_TOOL_CALL` | 工具调用前 | 推送 `tool_call` 卡片事件（工具名 + 入参） |
-| `AFTER_TOOL_CALL` | 工具调用后 | 推送 `tool_result` 卡片事件（结果摘要） |
+| `BEFORE_TOOL_CALL` | 工具调用前 | 推送 `message_start`（kind=tool，工具卡片占位）|
+| `AFTER_TOOL_CALL` | 工具调用后 | 填充工具卡片（结果摘要）|
+| `AFTER_MODEL_CALL` | LLM 调用后 | 渲染文本气泡（流式增量 / 完整回复）|
+| `MESSAGE_SENDING` | Agent 发送总线消息前 | 渲染 Agent 间协作提示气泡 |
 
-`GUIHooks.install(agent)` 对每个 Agent（包括运行期动态创建的子 Agent）安装上述三个处理器。所有处理器返回 `HookDecision.PASS`（不干预引擎执行）。
+`GUIHookBridge.inject(agent)` 对每个 Agent（包括运行期动态创建的子 Agent）安装上述处理器，并负责工作流完成检测（`workflow_complete` 事件）。所有处理器返回 `HookDecision.PASS`（不干预引擎执行）。
 
 ---
 
@@ -139,28 +141,31 @@ class MCPService:
 
 ## 6. WebSocket 事件协议（gui/hub/events.py）
 
-后端 → 前端推送的事件类型：
+后端 → 前端推送的事件类型（统一 JSON 对象，带 `type` 与 `ts` 字段）：
 
 | 事件 | 说明 |
 |------|------|
-| `init_data` | 连接建立，推送 agents/sessions/tools 全量数据 |
-| `history_messages` | 历史消息列表（切换会话时） |
-| `user_msg` | 用户消息回声 |
-| `agent_message_start` | Agent 开始新气泡（agent_id/name） |
-| `agent_chunk` | 流式文本增量（agent_id/delta） |
-| `agent_message_end` | 气泡结束（agent_id/meta：耗时/token 等） |
-| `tool_call` | 工具调用卡片（agent_id/tool/args） |
-| `tool_result` | 工具结果卡片（agent_id/tool/result） |
-| `agent_join` | 新子 Agent 加入群聊（系统消息 + 成员更新） |
-| `status` | Agent 状态变化（idle/running/…） |
-| `tool_list` | 工具列表更新 |
+| `hello` | 连接建立握手（master_id / auth_enabled）|
+| `pong` | 心跳应答 |
+| `session_created` / `session_deleted` | 会话创建 / 删除 |
+| `agent_join` | 新子 Agent 加入群聊（成员更新）|
+| `agent_update` | Agent 状态变化（idle/running/…）|
+| `message_start` | Agent 开始新气泡（msg_id/agent_id/kind=text\|tool）|
+| `message_chunk` | 流式文本增量 |
+| `message_replace` | 替换消息内容（工具结果替换占位符）|
+| `message_end` | 气泡结束（meta：耗时/token 等）|
+| `typing` | 输入中指示 |
+| `history` | 历史消息列表（连接/切换会话时）|
+| `tool_list` | 工具列表与统计（工具面板数据源）|
+| `workflow_step` | 工作流步骤状态变更 |
+| `workflow_complete` | 所有工作流步骤完成 |
 | `error` | 错误通知 |
 
-`WebSocketHub` 管理所有活跃 WebSocket 连接，提供 `broadcast(event)` 广播与 `send_to(ws, event)` 定向推送。
+`WebSocketHub` 管理所有活跃 WebSocket 连接，提供 `broadcast(event)` 广播与定向推送。
 
 ---
 
-## 7. REST 端点（gui/server.py）
+## 7. REST 端点与认证（gui/server.py）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -170,8 +175,19 @@ class MCPService:
 | DELETE | `/api/sessions/{id}` | 删除会话 |
 | POST | `/api/sessions/{id}/messages` | 发送消息 |
 | GET | `/api/tools` | 工具列表 + 统计（工具面板数据源） |
+| GET | `/api/audit` | 查询最近审计事件（需 admin 角色，limit / event_type 过滤）|
+| GET | `/healthz` | 健康探活（免认证：引擎就绪 / 认证开关 / 审计开关 / 连接数）|
 | GET | `/` | 前端 index.html |
 | GET | `/static/*` | 静态资源 |
+
+### 认证中间件（M1）
+
+由 `YOUMI_AUTH_TOKEN` / `YOUMI_AUTH_TOKENS` 配置启用（复用 `youmi/security/auth.py`，未配置时零摩擦放行）：
+
+- 保护范围：`/api/*` 与 `/ws`；豁免 `/`、`/static/*`、`/healthz`；
+- Token 形态：`Authorization: Bearer <token>` 或 `?token=<token>`；
+- 认证失败返回 401 并写审计日志；`/api/audit` 要求 admin 角色；
+- 前端 `auth.js` 将 `?token=` 自动存入 localStorage 并清理地址栏，后续 REST/WS 请求自动附带。
 
 ---
 
@@ -187,14 +203,18 @@ class MCPService:
 
 ## 9. 配置（gui/config.py）
 
-| 配置项 | 环境变量 | 默认值 | 说明 |
-|--------|---------|-------|------|
-| `port` | `YOUMI_GUI_PORT` | 8000 | HTTP 端口 |
-| `host` | `YOUMI_GUI_HOST` | `0.0.0.0` | 监听地址 |
-| `use_mock` | `YOUMI_USE_MOCK` | false | 启用 Mock 模式（无 LLM 演示） |
-| `mcp_enabled` | - | true | 启用 MCP 工具层 |
-| `bus_enabled` | - | true | 启用消息总线 |
-| `vault_enabled` | - | true | 启用 ToolVault 向量搜索 |
+| 环境变量 | 默认值 | 说明 |
+|---------|-------|------|
+| `YOUMI_GUI_HOST` | `127.0.0.1` | 监听地址 |
+| `YOUMI_GUI_PORT` | `8766` | HTTP 端口 |
+| `YOUMI_GUI_MASTER` | `master` | 主 Agent 名（对应 `youmi/agents/<name>/config.yaml`）|
+| `YOUMI_GUI_MCP` | `1` | 启用 MCP 工具调用层 |
+| `YOUMI_GUI_BUS` | `1` | 启用进程内消息总线 |
+| `YOUMI_GUI_VAULT` | `1` | 启用 ToolVault + ToolStore（sqlite-vec）|
+| `YOUMI_GUI_VAULT_DB` | （空）| ToolStore 数据库路径 |
+| `YOUMI_GUI_EMBEDDING_URL` | `http://localhost:11434/v1` | Embedding 服务地址 |
+| `YOUMI_GUI_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding 模型名 |
+| `YOUMI_AUTH_TOKEN` / `YOUMI_AUTH_TOKENS` | （空）| 认证 token（未配置零摩擦；见 youmi/security/auth.py）|
 
 ---
 
@@ -210,14 +230,15 @@ class MCPService:
 |------|------|
 | `index.html` | 三栏骨架（会话列表 + 聊天窗口 + 群成员） |
 | `app.js` | WebSocket 客户端、消息路由、渲染调度 |
-| `chat-renderer.js` | 气泡渲染（流式文本 + 工具卡片折叠） |
-| `session-panel.js` | 会话列表面板（未读角标、最后消息预览） |
+| `chat-renderer.js` | 气泡渲染（流式文本 + 工具卡片折叠；发言者变化时新建独立气泡）|
+| `session-panel.js` | 会话列表面板（未读角标、成员数实时更新）|
 | `panels.js` | 工具面板（工具库浏览） |
 | `modal.js` | 弹窗交互（新会话、确认等） |
 | `state.js` | 前端状态管理 |
 | `ui.js` | 通用 UI 工具函数 |
-| `ws.js` | WebSocket 连接管理与重连 |
-| `style.css` | QQ/微信风格样式（微信绿 #07C160 / QQ 蓝 #12B7F5） |
+| `ws.js` | WebSocket 连接管理与重连（认证 token 附带）|
+| `auth.js` | 认证逻辑（`?token=` 记忆 localStorage + 地址栏清理）|
+| `style.css` | QQ/微信风格样式（运行中状态黄色闪烁动画）|
 
 ---
 

@@ -38,7 +38,9 @@ Agent
 | `await close()` | 释放资源 |
 | `await snapshot()` | 返回状态快照（调试用） |
 
-属性：`strategy`（当前策略实例）、`strategy_name`（策略名称）、`agent_id`、`persistence`（后端实例）、`current_session_id`。
+属性：`strategy`（当前策略实例）、`strategy_name`（策略名称）、`agent_id`、`tenant`（租户标识）、`persistence`（后端实例）、`current_session_id`。
+
+构造时可通过 `MemoryManager(..., tenant="acme")` 指定租户（多租户隔离，默认 `default`）：会话持久化时 tenant 自动传播到后端，不同租户的会话数据互不可见（网关场景下由认证主体携带的 tenant 自动注入，详见 [Infra_Introduction.md](Infra_Introduction.md)）。
 
 ---
 
@@ -107,7 +109,7 @@ class PersistenceBackend(ABC):
 
 ### SQLiteBackend（sqlite_backend.py）
 
-基于 `asyncio.to_thread(sqlite3.connect, ...)` 的异步 SQLite 实现，适合生产使用：会话与消息落盘、支持按 agent_id 多会话管理、按时间排序检索。
+基于 `asyncio.to_thread(sqlite3.connect, ...)` 的异步 SQLite 实现，适合生产使用：会话与消息落盘、支持按 agent_id 多会话管理、按时间排序检索；支持 tenant 过滤（多租户隔离）。
 
 ### FileBackend（file_backend.py）
 
@@ -176,6 +178,7 @@ class MemoryConfig:
 | 存储对象 | LLM 对话消息序列 | 工具经验知识条目 |
 | 消费者 | 该 Agent 的 LLM 上下文 | ToolGuardian 诊断修复用 |
 | 注入 SubAgent | ✅ 自动注入对话上下文 | ❌ 不注入（避免容量膨胀） |
+| 多租户 | ✅ tenant 过滤（会话隔离） | ✅ tenant 绑定（知识隔离） |
 | 生命周期 | 与 Agent 绑定 | 跨工作流持久化 |
 
 ---

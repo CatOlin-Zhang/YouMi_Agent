@@ -1,8 +1,8 @@
 # MCP 工具层详解
 
-> 对应代码：`youmi/mcp/`（provider.py / server.py / client.py / bridge.py / vault.py / tool_store.py / context.py / approval.py / protocol.py / models.py）、`youmi/tools/`（builtin.py 等）
+> 对应代码：`youmi/mcp/`（provider.py / server.py / client.py / bridge.py / vault.py / tool_store.py / context.py / approval.py / confirm.py / cone.py / audit_gate.py / version_router.py / skill_store.py / skill_ingest.py / summary.py / protocol.py / models.py）、`youmi/_vec_utils.py`、`youmi/tools/`（builtin.py 等）
 
-MCP 层是 YouMi Agent 的统一工具调用网关，采用 **Provider → Server → Client → Bridge** 四层架构，在此之上叠加 ToolVault（语义缓存）、ToolStore（持久化版本管理）与 AgentToolContext（Agent 侧三级状态）。
+MCP 层是 YouMi Agent 的统一工具调用网关，采用 **Provider → Server → Client → Bridge** 四层架构，在此之上叠加 ToolVault（语义缓存）、ToolStore（持久化版本管理）与 AgentToolContext（Agent 侧三级状态）。召回链路上另有一组已实现、待接线的治理组件（锥形检索 / 召回审计闸门 / 版本路由 / Skill 库，见 §10）。
 
 ---
 
@@ -114,10 +114,14 @@ tool_dependencies— 工具依赖关系
 | `upsert_tool(entry)` | 插入或更新工具（新版本插入即更新 vec_tools） |
 | `create_version(name, new_version, change)` | 创建新版本，记录 parent_version_id |
 | `get_version_chain(name)` | 获取完整版本历史链 |
+| `get_root_version(name)` / `get_head_version(name)` | 版本链根版本（首次提交）/ 最新版本（供 CallPathRouter 分流） |
 | `add_changelog(name, change)` | 追加同版本变更日志 |
 | `search(query, top_k)` | 向量语义或关键词搜索 |
+| `search_cone(query, top_k, min_score, tags, risk_ceiling, exclude, exclude_lineages)` | **锥形联合检索**：语义方向 ∩ tag 边界 ∩ 风险边界 ∩ 排除集，一条 SQL 内完成裁剪 |
 | `add_alias / resolve_alias` | 别名管理 |
 | `add_tag / search_by_tags` | 标签管理 |
+
+同名工具的全部版本共享同一条版本链（`lineage_id` 默认 = 工具名），锥形检索支持按版本链去重（exclude_lineages）。
 
 `PostTaskPipeline` 累计失败超阈值时调用 `trigger_tool_version_update()` → 自动调用 `ToolStore.create_version()` 写入修复版本。
 
@@ -163,7 +167,32 @@ class ToolIssueType(str, Enum):
 
 ---
 
-## 7. 工具发现与注册全流程
+## 7. 召回确认闭环（confirm.py，P1）
+
+`ToolBridge.search_and_confirm(query)` 实现「搜索 → 确认 → 动作」完整闭环：
+
+```
+search_and_confirm(query)
+  ├─ discover_tools(query) 召回候选
+  ├─ call_confirmer(candidate) 判定是否为所需工具
+  │    ├─ 合适 → load_tool() 提升为 HOT，返回成功
+  │    ├─ 不合适 → 排除该候选，扩大搜索继续下一轮
+  │    └─ 多轮无果 → 回复「没有该功能的工具」
+```
+
+确认策略可插拔（`Confirmer` 协议，同步/异步均可）：
+
+| 策略 | 说明 |
+|------|------|
+| `auto_confirm` | 默认：首个候选直接确认 |
+| `LLMConfirmer` / `build_llm_confirmer(llm_client)` | 由 LLM 判定候选与需求是否匹配 |
+| 自定义回调 | 传入任意 `async (query, candidate) -> ConfirmDecision` |
+
+判定器抛异常时优雅降级（按不合适处理），不卡闭环。
+
+---
+
+## 8. 工具发现与注册全流程
 
 ```
 1. 用户/管理员                    向 MCPServer.register_provider() 注册 ToolProvider
@@ -182,7 +211,7 @@ class ToolIssueType(str, Enum):
 
 ---
 
-## 8. MCPService GUI 集成层（gui/engine/mcp_service.py）
+## 9. MCPService GUI 集成层（gui/engine/mcp_service.py）
 
 GUI 启动时 `EngineBridge.init()` 创建 `MCPService`，一站式初始化：
 
@@ -197,8 +226,26 @@ GUI 启动时 `EngineBridge.init()` 创建 `MCPService`，一站式初始化：
 
 ---
 
-## 9. 相关文档
+## 10. 治理组件（已实现，待接线）
+
+以下组件均已实现并通过单测，尚未接入 ToolBridge 运行时主链路（按 P0→P2 分阶段接线）：
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| `ConeRetriever` | `cone.py` | **锥形检索融合层**：语义方向 ∩ tag ∩ 风险 ∩ 权限四边界联合裁剪；优先 ToolStore.search_cone（SQL 锥形），无 Store 时回退 Vault 内存锥形；返回 `ConeStats` 裁剪统计（诊断/审计用） |
+| `AuditGate` | `audit_gate.py` | **召回审计闸门**：召回命中后、加载 schema 前拦截；权限不满足（required ⊄ granted）→ BLOCK；风险超阈值（默认 high）→ MANUAL（自动入 ApprovalManager 待审队列）；三态均写 `tool.recall_audit` 审计事件 |
+| `CallPathRouter` | `version_router.py` | **调用版本路由**：按调用来源分流 — SKILL 来源 → root 版本（有 Skill 绑定时）；CROSS_DOMAIN / DIRECT → head 最新版本 |
+| `SkillStore` | `skill_store.py` | **SOP Skill 并行库**（SQLite + sqlite-vec，结构镜像 ToolStore）：SkillEntry 含 L0 describe 原文 / L1 摘要（≤80 字）/ L2 摘要的摘要（≤30 字）与 bound_tool_name 绑定；L1/L2 双层向量索引（L2 无命中自动回退 L1）；search_cone 锥形检索 |
+| `SkillIngestor` | `skill_ingest.py` | **Skill 文档入库器**：宽容解析 Markdown（frontmatter / 首行 key: value / 标题兜底）→ 生成 L1/L2 摘要 → 绑定 Tool → 入库 |
+| `SummaryGenerator` | `summary.py` | **三级摘要生成器**：默认启发式截断；注入 LLM 时生成式摘要（失败回退启发式） |
+
+共享向量工具（`youmi/_vec_utils.py`）：sqlite-vec 扩展加载（`try_load_sqlite_vec`）、向量归一化、L2/余弦互转、纯 Python 余弦降级，供 ToolStore / GlobalMemory / PlanMemory / SkillStore 复用。
+
+---
+
+## 11. 相关文档
 
 - [Agent_Introduction.md](Agent_Introduction.md) — 工具调用在 Agent ReAct 中的位置
 - [Master_Introduction.md](Master_Introduction.md) — 工具审批决策与工作流权限回收
 - [GlobalMemory_Introduction.md](GlobalMemory_Introduction.md) — 工具经验沉淀与修复闭环
+- [Infra_Introduction.md](Infra_Introduction.md) — 审计日志与召回审计事件

@@ -1,6 +1,6 @@
 # YouMi Agent 实施计划
 
-> 最后更新：2026-08-31
+> 最后更新：2026-09-29
 >
 > 本文档已合并 `supplement_roadmap.md`（生产就绪缺口分析），形成统一的开发路线图。
 
@@ -14,11 +14,48 @@ GUI 已与核心 MCP/Bus 层完成集成：所有 Agent 通过 MCPService 接入
 
 Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 自动沉淀工具使用经验到 GlobalMemory（SQLite + 向量检索），累计失败超阈值自动触发工具版本更新；ToolGuardian 接入全局记忆，修复前自动查询历史经验作为上下文，修复成功后写入 BUG_FIX 经验并标记历史问题 resolved。
 
-但对照完整生命周期流程图，**编排层高级能力（层级架构）、Skill 导入**等高级能力尚未落地。
+**M1 生产加固已交付**：LLM 与工具调用已接入重试退避 + 熔断器 + 超时治理（`youmi/core/resilience.py`）；统一 OpenTelemetry 追踪与审计日志（`youmi/observability/`，LLM/工具/认证事件全覆盖，支持 JSONL/OTLP 导出）；安全侧实现配置启用式 token 认证（总线 + GUI）与策略式执行沙箱（`youmi/security/`）；GUI 新增认证中间件、`/healthz` 健康检查与 `/api/audit` 审计查询端点。
 
-**总体完成度：约 82%**
+**P1 功能闭环与生产可用已交付**：召回确认闭环（`youmi/mcp/confirm.py` 可插拔确认策略 + `ToolBridge.search_and_confirm` 完整闭环：搜索 → 确认 → 合适则加载 / 不合适排除并扩大搜索 / 多轮无果回复「没有该功能的工具」）；AgentToolContext 轮次自动推进（`_advance_tool_context()` 在 run / chat_turn / chat_turn_stream 三路自动调用）；FastAPI 任务网关（`youmi/gateway/`：任务队列 + asyncio Worker 池 + SSE 事件流 + 认证/审计 + 租户隔离，`python -m youmi.gateway` 启动）；Mock LLM Server（OpenAI 兼容：脚本化 / 流式 / 错误注入）+ Eval 基准（`youmi/eval/`：数据集 + 完成率/工具准确率/成本评分 + CLI）。
 
-**生产就绪度：较低** — 当前缺乏重试容错、安全加固、可观测性、部署形态等生产必需能力，需优先补齐。
+**Phase 5 Skill 库与召回治理组件已落地（待接线）**：SkillStore（SOP Skill 并行库，sqlite-vec L1/L2 双层索引，结构镜像 ToolStore）+ SkillIngestor（Markdown 宽容解析入库）+ SummaryGenerator（三级摘要）；召回治理组件 ConeRetriever（锥形检索：语义∩tag∩风险∩权限）、AuditGate（召回审计闸门 BLOCK/MANUAL/PASS）、CallPathRouter（SKILL/CROSS_DOMAIN/DIRECT 调用来源版本分流）均已实现并通过单测，接入 ToolBridge 运行时主链路待后续阶段。
+
+但对照完整生命周期流程图，**编排层高级能力（层级架构）、Skill 运行时接线**等高级能力尚未落地。
+
+**总体完成度：约 94%**（组件层基本齐全，剩余为接线与运维类缺口）
+
+**生产就绪度：中高** — 可靠性（重试/熔断）、安全（认证/沙箱）、可观测性（OTel/审计/健康检查）已就位；部署形态随 P1 补齐（HTTP 网关 + asyncio 多 Worker + 多租户隔离）；剩余缺口为持久化任务队列（崩溃恢复）、凭证集中管理与容器化（K8s）。
+
+---
+
+## M1：生产加固（可靠性 / 安全 / 可观测性）
+
+### 已实现
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| 重试退避 + 熔断器 | `youmi/core/resilience.py` | FIXED/LINEAR/EXPONENTIAL 退避 + 熔断状态机（CLOSED/OPEN/HALF_OPEN）；`retry_async` / `CircuitBreaker` / 进程级注册表 |
+| 审计日志 | `youmi/observability/audit.py` | 结构化审计事件（内存环形缓冲 + 可选 JSONL 落盘 + 敏感字段脱敏）；LLM/工具/认证事件快捷方法 |
+| OTel 追踪 | `youmi/observability/tracing.py` | `span()` / `set_span_attributes()` / `setup_tracing()`；支持 Console/JSONL/OTLP 导出；LLM 与工具调用全链路 span |
+| LLM 治理接入 | `youmi/llm/client.py` | 重试退避 + 熔断 + 超时 + span + 审计；chat_stream 仅连接建立阶段可重试 |
+| 工具调用治理接入 | `youmi/core/tool_executor.py` | 熔断（拒绝不打断 ReAct 循环）+ 统一超时 + span + 审计 |
+| 认证与角色（RBAC） | `youmi/security/auth.py` | `AuthManager`（`hmac.compare_digest` 恒时比较）；admin/agent/viewer 三角色；配置启用式（未配置零摩擦） |
+| 总线认证接入 | `youmi/bus/server.py`, `youmi/bus/ws_client.py`, `youmi/bus/message.py` | 订阅信封携带 token；未授权 4401 关闭 + 审计；BusClient 支持 token 与硬拒绝错误（不重试） |
+| 策略式执行沙箱 | `youmi/security/sandbox.py` | 内置危险命令黑名单（始终生效）+ 白名单/允许根目录/网络限制/环境变量清理/超时与输出钳制 |
+| 沙箱接入工具层 | `youmi/tools/shell_ops.py`, `youmi/tools/file_ops.py` | shell 命令经 `Sandbox.evaluate_command`；文件路径经 `check_path` 根目录约束 |
+| GUI 认证中间件 | `gui/server.py` | 保护 `/api/*` 与 `/ws`（`Authorization: Bearer` / `?token=`）；认证失败 401 + 审计 |
+| 健康检查端点 | `gui/server.py` | `GET /healthz`（免认证）：引擎就绪 / 认证开关 / 审计开关 / 连接数 |
+| 审计查询端点 | `gui/server.py` | `GET /api/audit`（admin 角色）：limit / event_type 过滤 |
+| 前端 token 支持 | `gui/static/js/auth.js` 等 | `?token=` 自动记住（localStorage）+ 地址栏清理；REST/WS 请求自动附带 |
+| 顶层 API 导出 | `youmi/__init__.py` | 可靠性 / 可观测性 / 安全模块公开符号 |
+
+### 未实现
+
+| 缺失项 | 说明 |
+|--------|------|
+| 持久化任务队列 | 消息总线仍为内存态，崩溃后任务丢失（P0 剩余） |
+| 凭证集中管理 | 依赖环境变量注入 token / API Key，无集中式凭据管理 |
+| 监控与告警 | OTel 数据已可导出（JSONL/OTLP），但尚无 Prometheus/Grafana 仪表盘集成 |
 
 ---
 
@@ -58,9 +95,7 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 ### 未实现
 
-| 缺失项 | 说明 |
-|--------|------|
-| 统一的工具调用超时控制与重试 | 仅 `shell_exec` 有超时，其他工具未统一 |
+无（工具调用统一超时控制 + 熔断 + 审计已于 M1 落地，见 `youmi/core/tool_executor.py`）
 
 ---
 
@@ -126,31 +161,40 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 | **sqlite-vec 默认启用** | `gui/engine/mcp_service.py` | MCPService.setup() 默认创建 ToolStore + ToolVault + EmbeddingClient，工具描述向量化后存入 SQLite |
 | **优雅降级策略** | `gui/engine/mcp_service.py` | Embedding 失败 → 关键词搜索；Store 失败 → 纯内存；任何异常不阻塞 MCP 主流程 |
 | **GUI Agent 自动接入 Vault** | `gui/engine/bridge.py` | Master 和子 Agent 的 ToolBridge 自动注入共享 Vault 实例 |
+| **召回确认闭环** | `youmi/mcp/confirm.py`, `youmi/mcp/bridge.py` | `search_and_confirm` 完整闭环 + 可插拔确认策略（默认 auto_confirm / LLMConfirmer / 自定义回调，同步异步皆可）；判定器异常优雅降级不卡闭环 |
+| **AgentToolContext 轮次自动推进** | `youmi/core/agent.py` | `_advance_tool_context()`（advance_turn + recycle + 刷新 WARM 层）在 run / chat_turn / chat_turn_stream 三路自动调用，工具自动回收生效 |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
 | MCP_Agent 功能封装 | `ToolBridge.inject_tool_context()` 接口已具备，但尚无独立的 MCP_Agent 角色自动为 SubAgent 补充工具上下文 |
-| 召回确认闭环 | 原发起 Agent 确认：合适则加载到上下文；不合适则扩大搜索并排除已否决项；多次不合适回复“没有该功能的工具”（`search_and_confirm` 基础接口已有，自动闭环未接入对话流） |
 | 多语言代码执行接口 | `tools.language` / `tools.runtime` 字段；当前仅实现 Python 执行器，其他语言留扩展接口 |
-| AgentToolContext 轮次推进接入对话循环 | `advance_turn()` / `recycle()` 尚未在 Agent 每轮对话后自动调用，自动回收暂未生效 |
 
 ---
 
 ## Phase 5：外部 Skill 导入
 
-### 已实现
+### 已实现（组件层，待运行时接线）
 
-无
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| SkillStore SOP 并行库 | `youmi/mcp/skill_store.py` | SQLite + sqlite-vec（结构镜像 ToolStore）：SkillEntry 含 L0 describe / L1 摘要（≤80 字）/ L2 摘要的摘要（≤30 字）与 bound_tool_name 绑定；L1/L2 双层向量索引（L2 无命中回退 L1）；锥形检索 search_cone |
+| Skill 文档入库器 | `youmi/mcp/skill_ingest.py` | `parse_skill_doc` 宽容解析（frontmatter / 首行 key: value / 标题兜底）+ `SkillIngestor.ingest()`（解析 → L1/L2 摘要 → 绑定 Tool → 入库）|
+| 三级摘要生成器 | `youmi/mcp/summary.py` | SummaryGenerator：默认启发式截断，注入 LLM 时生成式摘要（失败回退启发式）|
+| 召回审计闸门 | `youmi/mcp/audit_gate.py` | AuditGate：召回命中后、加载 schema 前拦截；权限不满足 → BLOCK；风险超阈值 → MANUAL（自动入 ApprovalManager 待审队列）；三态均写 `tool.recall_audit` 审计事件 |
+| 锥形检索融合层 | `youmi/mcp/cone.py` | ConeRetriever：语义方向 ∩ tag ∩ 风险 ∩ 权限四边界联合裁剪；优先 ToolStore.search_cone（SQL 锥形），无 Store 回退 Vault 内存锥形；ConeStats 裁剪统计 |
+| 调用版本路由 | `youmi/mcp/version_router.py` | CallPathRouter：SKILL 来源 → root 版本（有 Skill 绑定）；CROSS_DOMAIN / DIRECT → head 最新版本 |
+| 共享向量工具 | `youmi/_vec_utils.py` | sqlite-vec 加载 / 向量归一化 / L2↔余弦互转 / 纯 Python 余弦降级，ToolStore / GlobalMemory / PlanMemory / SkillStore 复用 |
+| 单测覆盖 | `tests/test_skill_store.py`, `test_skill_ingest.py`, `test_audit_gate.py`, `test_cone_retrieval.py`, `test_version_router.py`, `test_version_tree.py` | 组件层全部有独立单测 |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
-| `youmi/skills/` 整个模块 | Skill 加载器、清单模型、文档自动生成 |
-| 代码型 Skill 目录规范 | `manifest.yaml` + `tools/` + `workflow.py` |
-| Markdown 轻量 Skill 解析器 | `.md` 指令注入 system prompt |
+| Skill 运行时接线 | SkillIngestor 入库入口（CLI / GUI）与 CallPathRouter/AuditGate/ConeRetriever 接入 ToolBridge 主链路待后续阶段 |
+| `youmi/skills/` 完整模块 | 代码型 Skill（manifest.yaml + tools/ + workflow.py）目录规范 |
+| Markdown 轻量 Skill 注入 | `.md` 指令注入 system prompt（需 Skill 检索命中后注入 Agent 上下文）|
 
 ---
 
@@ -237,12 +281,12 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 ### 1. 可靠性与容错 — **最高优先级**
 
-> 当前系统无任何容错机制，瞬时故障即导致任务失败，是生产部署的首要障碍。
+> M1 已交付重试退避 + 熔断器（LLM/工具调用全链路）；剩余为持久化队列与多步补偿类机制。
 
 | 缺口 | 现状 | 目标 |
 |------|------|------|
-| LLM 调用重试与退避 | `llm/client.py` 无重试、无超时 | 指数退避重试 + 超时控制（装饰器层，覆盖所有 client 调用） |
-| 熔断器 | 无 | 对高失败率 MCP/工具自动熔断，防止雪崩 |
+| LLM 调用重试与退避 | ✅ 已实现（M1，`youmi/core/resilience.py`） | 指数退避重试 + 超时控制（装饰器层，覆盖所有 client 调用） |
+| 熔断器 | ✅ 已实现（M1）：CLOSED/OPEN/HALF_OPEN 状态机 + 进程级注册表 | 对高失败率 MCP/工具自动熔断，防止雪崩 |
 | 持久化任务队列 | 消息总线为内存态，崩溃即丢失在途任务 | Redis Streams / RabbitMQ / 本地 SQLite WAL，支持断点续跑与 checkpoint |
 | 多步计划补偿 | 无 | 每步超时/预算 + Saga/补偿机制，支持中途失败回滚 |
 | 死信队列 | 无 | 失败任务可重放，不丢失 |
@@ -250,37 +294,37 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 ### 2. 安全 — **高优先级**
 
-> 当前无任何安全控制，总线无认证、工具无沙箱、凭证管理不明，无法在受控环境外部署。
+> M1 已交付 token 认证/RBAC + 策略式沙箱 + 审计脱敏；剩余为凭证集中管理与注入防护。
 
 | 缺口 | 现状 | 目标 |
 |------|------|------|
-| 认证与授权 | BusServer 无认证，任意客户端可连 | 总线与 API 增加 token/mTLS，按 agent/用户做 RBAC |
-| 凭证管理 | MCP server 凭据存储方式不明 | 接入 Secret Manager（环境变量 / Vault），禁止明文落盘 |
-| 执行沙箱 | `shell_ops` / `web_ops` 直接执行，无隔离 | 在容器/隔离环境运行，限制网络与文件系统访问 |
+| 认证与授权 | ✅ 已实现（M1）：总线 + GUI + 网关复用（Bearer / `?token=`，admin/agent/viewer 三角色） | 总线与 API 增加 token/mTLS，按 agent/用户做 RBAC |
+| 凭证管理 | 依赖环境变量注入 token / API Key，无集中管理 | 接入 Secret Manager（环境变量 / Vault），禁止明文落盘 |
+| 执行沙箱 | ✅ 已实现（M1）：策略式沙箱（`youmi/security/sandbox.py`） | 在容器/隔离环境运行，限制网络与文件系统访问 |
 | 注入防护 | MCP 返回内容未做结构化解析 | 对不可信 server 返回做指令边界检测，防止提示注入 |
 | 审计与脱敏 | 日志/记忆无脱敏 | 日志/记忆落库前 PII 脱敏，保留可审计链路 |
 
 ### 3. 可观测性 — **高优先级**
 
-> 当前仅有 MCP 请求 `trace_id` 关联字段，无法回答「谁、何时、调了什么工具、卡在哪一步」。
+> M1 已交付 OTel 全链路追踪 + 审计日志 + 健康检查；剩余为指标监控（Prometheus/Grafana）。
 
 | 缺口 | 现状 | 目标 |
 |------|------|------|
-| 分布式追踪 | 仅有日志 | 引入 OpenTelemetry，对 LLM 调用、工具调用、总线消息统一埋点（trace + span） |
-| 审计日志 | 无 | agent_id / task_id / tool / 入参脱敏 / 耗时 / token / 费用 / 结果状态 |
+| 分布式追踪 | ✅ 已实现（M1）：OTel span（LLM/工具调用全链路，JSONL/OTLP 导出） | 引入 OpenTelemetry，对 LLM 调用、工具调用、总线消息统一埋点（trace + span） |
+| 审计日志 | ✅ 已实现（M1）：统一 AuditLogger（LLM/工具/认证事件，内存缓冲 + JSONL + 脱敏） | agent_id / task_id / tool / 入参脱敏 / 耗时 / token / 费用 / 结果状态 |
 | 指标监控 | 无 | 接入 Prometheus + Grafana，暴露任务吞吐、队列深度、LLM 错误率等指标 |
-| 健康检查 | 无 | 提供 /health、/ready 存活探针端点 |
+| 健康检查 | ✅ 已实现（M1 + P1）：GUI `/healthz` + 网关 `/health` | 提供 /health、/ready 存活探针端点 |
 
 ### 4. 部署与规模化 — **中高优先级**
 
-> 当前单机单 Coordinator + 子进程 Agent，无法被外部系统调用，并发受单机限制。
+> HTTP 网关 + asyncio 多 Worker + 多租户已随 P1 落地；剩余为持久化队列与容器化（K8s）。
 
 | 缺口 | 现状 | 目标 |
 |------|------|------|
-| API 网关 | 无 HTTP 入口，唯一入口为 Streamlit GUI | FastAPI 网关：`submit_task` / `query_status` / `stream_events` 等接口 |
-| 任务调度解耦 | 调度与执行耦合 | 任务队列 + 多 Worker（Celery / Ray / asyncio 池） |
-| 多租户隔离 | 无 | 会话/记忆按 tenant 隔离，避免共享记忆串上下文 |
-| 容器化部署 | 无 | K8s Deployment / HPA / 无状态 Worker 清单 |
+| API 网关 | ✅ 已实现 FastAPI 网关（`youmi/gateway/`：submit / query / SSE 事件流 + 认证 + 审计） | 兼容 OpenAI Assistants 风格输出（P3） |
+| 任务调度解耦 | ✅ 已实现任务队列 + asyncio Worker 池（`youmi/gateway/`，队列抽象可外接 Redis 等） | 持久化队列（断点续跑，P0 剩余） |
+| 多租户隔离 | ✅ 已实现认证主体 tenant 自动传播（任务列表过滤 + GlobalMemory/MemoryManager 隔离） | 租户级配额与限流 |
+| 容器化部署 | 无（网关为无状态 Worker，可水平扩展） | K8s Deployment / HPA / 无状态 Worker 清单 |
 
 ### 5. 成本治理 — **中优先级**
 
@@ -295,12 +339,12 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 ### 6. 质量保障与评估 — **中优先级**
 
-> 测试集中在非 LLM 路径（EchoAgent 单测），LLM 行为无回归基准，无输出质量评估。
+> LLM 依赖路径已具备确定性回放（Mock LLM）与量化基准（Eval，完成率 / 工具准确率 / 成本）；剩余为人工反馈闭环。
 
 | 缺口 | 现状 | 目标 |
 |------|------|------|
-| Mock LLM | 无 | mock LLM server，对 LLM 依赖路径做确定性集成测试 |
-| Eval 基准 | 无 | eval 数据集 + 评分脚本（任务完成率、工具选择准确率、成本） |
+| Mock LLM | ✅ 已实现 OpenAI 兼容 mock server（`youmi/llm/mock_server.py`：脚本化响应 / 流式 / 错误注入 / 延迟注入） | 场景库持续扩展 |
+| Eval 基准 | ✅ 已实现数据集 + 评分（完成率 / 工具准确率 / 成本）+ CLI（`youmi/eval/`） | 基准任务集扩展 |
 | 反馈闭环 | 无 | 人工反馈采集，回写全局经验（与 Phase 6 联动） |
 
 ### 7. 工程化与可演进性 — **中低优先级**
@@ -329,29 +373,29 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 ```
 P0 — 稳定性与安全（生产部署前置条件）
-  ├── 可靠性：LLM 重试退避 + 熔断器                          ❌ 未实现（首要障碍）
+  ├── 可靠性：LLM 重试退避 + 熔断器                          ✅ 已交付（M1）
   ├── 可靠性：持久化任务队列 + 断点续跑                       ❌ 未实现
   ├── 可靠性：Saga/补偿 + 死信队列 + 过载保护                 ❌ 未实现
-  ├── 安全：认证/RBAC（总线 + API）                          ❌ 未实现
-  ├── 安全：凭证管理 + PII 脱敏                              ❌ 未实现
-  ├── 安全：执行沙箱 + 注入防护                              ❌ 未实现
-  └── 可观测性：OTel 埋点 + 审计日志 + 监控 + 健康检查       ❌ 未实现
+  ├── 安全：认证/RBAC（总线 + API + 网关）                    ✅ 已交付（M1 + P1）
+  ├── 安全：凭证管理 + PII 脱敏                              ❌ 未实现（审计已含脱敏）
+  ├── 安全：执行沙箱 + 注入防护                              🟡 沙箱已交付（M1）；注入防护未实现
+  └── 可观测性：OTel 埋点 + 审计日志 + 监控 + 健康检查       🟡 追踪/审计/健康检查已交付（M1）；监控告警未实现
 
 P1 — 功能闭环与生产可用
-  ├── Phase 4  AgentToolContext 三级状态管理 + 集成           ✅ 已完成（轮次自动推进待接入）
-  ├── Phase 4  召回确认闭环                                  ❌ 未实现
+  ├── Phase 4  AgentToolContext 三级状态管理 + 集成           ✅ 已完成（含轮次自动推进）
+  ├── Phase 4  召回确认闭环                                  ✅ 已完成（可插拔确认策略 + search_and_confirm）
   ├── Phase 6  全局记忆 / 工具经验沉淀                       ✅ 已完成（含 ToolGuardian 经验消费闭环）
   ├── Phase 6  记忆向量检索                                  ✅ 已完成（MemoryManager.search）
-  ├── 部署：FastAPI 网关 + 多 Worker                         ❌ 未实现
-  ├── 部署：多租户隔离                                       ❌ 未实现
-  └── 质量保障：mock LLM + eval 基准                         ❌ 未实现
+  ├── 部署：FastAPI 网关 + 多 Worker                         ✅ 已完成（youmi/gateway/：SSE + 认证 + 审计）
+  ├── 部署：多租户隔离                                       ✅ 已完成（认证主体 tenant 自动传播）
+  └── 质量保障：mock LLM + eval 基准                         ✅ 已完成（youmi/llm/mock_server.py + youmi/eval/）
 
 P2 — 降本增效与工程化
   ├── 成本治理：费用计量 + 预算上限                           ❌ 未实现
   ├── 成本治理：模型路由 + 语义缓存                          ❌ 未实现
   ├── 工程化：CI/CD + 文档补全（docs/ 已补全）                ✅ 文档 / ❌ CI
   ├── 工程化：版本注册表 + 实验追踪                          ❌ 未实现
-  ├── Phase 5  Skill 导入                                    ❌ 未实现
+  ├── Phase 5  Skill 导入                                    🟡 组件已实现（SkillStore/SkillIngestor/Summary），运行时接线未完成
   └── 外部通信渠道（Telegram/Discord）                       ❌ 未实现
 
 P3 — 长期扩展与生态
@@ -387,6 +431,15 @@ P3 — 长期扩展与生态
 ✅ Phase 6  PostTaskPipeline 经验沉淀 + 自动版本更新触发
 ✅ Phase 6  记忆向量检索（MemoryManager.search + 策略 search）
 ✅ Phase 6  ToolGuardian 经验消费闭环（修复前查询经验 + 修复后 BUG_FIX 写回 + mark_resolved）
+✅ P1  召回确认闭环（search_and_confirm + 可插拔确认策略）
+✅ P1  AgentToolContext 轮次自动推进（run / chat_turn / chat_turn_stream）
+✅ P1  FastAPI 网关 + asyncio Worker 池 + SSE 事件流（youmi/gateway/）
+✅ P1  网关认证（Bearer/?token= + 审计）与多租户隔离（tenant 自动传播）
+✅ P1  Mock LLM Server（OpenAI 兼容：脚本化 / 流式 / 错误注入）
+✅ P1  Eval 基准（数据集 + 完成率 / 工具准确率 / 成本评分 + CLI）
+✅ Phase 5  SkillStore SOP 并行库（sqlite-vec L1/L2 双层索引 + 锥形检索）
+✅ Phase 5  SkillIngestor + SummaryGenerator（Skill 文档宽容解析 + 三级摘要）
+✅ Phase 5  召回治理组件（ConeRetriever 锥形检索 / AuditGate 审计闸门 / CallPathRouter 版本路由）— 组件已实现，待接线
 ✅ GUI-Core MCP 集成（MCPService + sqlite-vec 默认启用）
 ✅ GUI-Core Bus 集成（InProcessBroker + 子 Agent 自动接入）
 ✅ GUI 工具面板（前端 + /api/tools + tool_list 事件）
@@ -398,7 +451,7 @@ P3 — 长期扩展与生态
 ## 建议里程碑
 
 - **M1 — 基础稳固**：P0 可靠性（重试退避 + 熔断）+ P0 安全（认证 + 沙箱）+ P0 可观测性（OTel + 审计日志）→ 达到「可控、可查、可观测」的最小生产门槛。
-- **M2 — 可运维**：P0 可靠性（持久队列 + 断点续跑 + Saga）+ P1 部署（FastAPI 网关 + Worker + 多租户）→ 支持真实并发与故障恢复。
-- **M3 — 功能完整**：P1 工具生命周期闭环（AgentToolContext + 召回闭环）+ P1 全局记忆（经验沉淀 + 向量检索 + ToolGuardian 闭环）→ 工具与知识可积累。
+- **M2 — 可运维**：P0 可靠性（持久队列 + 断点续跑 + Saga）+ P1 部署（FastAPI 网关 + Worker + 多租户）→ 支持真实并发与故障恢复。（部署部分 ✅ 已交付，持久队列待做）
+- **M3 — 功能完整**：P1 工具生命周期闭环（AgentToolContext + 召回闭环）+ P1 全局记忆（经验沉淀 + 向量检索 + ToolGuardian 闭环）→ 工具与知识可积累。（✅ 已交付）
 - **M4 — 降本增效**：P2 成本治理 + 质量保障 + 工程化 → 成本可控、行为可回归、配置可复现。
 - **M5 — 生态扩展**：P3 互操作 + 层级架构 + 外部通信 → 融入外部 agent 生态，支持复杂编排。
