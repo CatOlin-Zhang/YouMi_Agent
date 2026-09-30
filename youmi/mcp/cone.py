@@ -183,7 +183,11 @@ class ConeRetriever:
                 exclude_lineages=cone.exclude_lineages,
             )
         except Exception as exc:
+            # store 路径失败 (如旧库 schema 不兼容) → 回退 vault 内存锥形,
+            # 避免 search_new_tools 静默返回空导致上层空转
             logger.warning("ConeRetriever: store cone search failed: %s", exc)
+            if self._vault is not None:
+                return await self._retrieve_via_vault(cone)
             return []
 
     # ------------------------------------------------------------------

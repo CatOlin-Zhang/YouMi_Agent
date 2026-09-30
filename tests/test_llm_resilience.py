@@ -487,3 +487,104 @@ class TestChatStream:
             assert len(calls) == 1
         finally:
             await client.close()
+
+    async def test_stream_reasoning_yielded_and_on_delta(self):
+        """推理模型思考流: reasoning 被 yield 且 on_delta 分类回调
+
+        gpt-oss 等推理模型的思考内容在 delta.reasoning 中传输，
+        此前只取 delta.content 导致工具调用轮全程无输出。
+        """
+        chunks = [
+            {"choices": [{"delta": {"reasoning": "让我"}}]},
+            {"choices": [{"delta": {"reasoning": "想想"}}]},
+            {"choices": [{"delta": {"content": "答案"}}]},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _sse_response(*chunks)
+
+        client = await _make_client(handler)
+        try:
+            deltas: list[tuple[str, str]] = []
+
+            async def on_delta(kind: str, text: str) -> None:
+                deltas.append((kind, text))
+
+            parts = []
+            async for chunk in client.chat_stream(_msg(), on_delta=on_delta):
+                parts.append(chunk)
+
+            # 思考内容作为文本块流出，思考/回答之间插入空行分隔
+            assert "".join(parts) == "让我想想\n\n答案"
+            # on_delta 按 kind 分类回调
+            assert deltas == [
+                ("reasoning", "让我"),
+                ("reasoning", "想想"),
+                ("content", "答案"),
+            ]
+
+            final = client._last_stream_response
+            # conversation 侧只保留最终回答，思考不混入
+            assert final.content == "答案"
+            assert final.raw_message == {"role": "assistant", "content": "答案"}
+            # 完整思考内容挂在 raw message 上（LLMResponse.raw_message
+            # 属性重建 dict 时丢弃 reasoning — 有意不污染 conversation）
+            assert final.raw["choices"][0]["message"]["reasoning"] == "让我想想"
+        finally:
+            await client.close()
+
+    async def test_stream_reasoning_content_compat(self):
+        """DeepSeek 风格 API: delta.reasoning_content 字段兼容"""
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "思考"}}]},
+            {"choices": [{"delta": {"content": "回答"}}]},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _sse_response(*chunks)
+
+        client = await _make_client(handler)
+        try:
+            deltas: list[tuple[str, str]] = []
+
+            async def on_delta(kind: str, text: str) -> None:
+                deltas.append((kind, text))
+
+            parts = []
+            async for chunk in client.chat_stream(_msg(), on_delta=on_delta):
+                parts.append(chunk)
+
+            assert ("reasoning", "思考") in deltas
+            assert "".join(parts) == "思考\n\n回答"
+            assert client._last_stream_response.content == "回答"
+        finally:
+            await client.close()
+
+    async def test_stream_reasoning_with_tool_calls(self):
+        """思考流 + 工具调用轮: reasoning 照常流出，content 为空"""
+        chunks = [
+            {"choices": [{"delta": {"reasoning": "需要查询天气"}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_r",
+                 "function": {"name": "get_weather",
+                               "arguments": '{"city": "北京"}'}}]}}]},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _sse_response(*chunks)
+
+        client = await _make_client(handler)
+        try:
+            parts = []
+            async for chunk in client.chat_stream(_msg()):
+                parts.append(chunk)
+            # 此前该场景 parts == []（GUI 全程无输出的根因）
+            assert parts == ["需要查询天气"]
+
+            final = client._last_stream_response
+            assert final.has_tool_calls
+            assert final.content == ""  # 思考不污染对话内容
+            assert (final.raw["choices"][0]["message"]["reasoning"]
+                    == "需要查询天气")
+        finally:
+            await client.close()

@@ -667,6 +667,75 @@ class TestToolBridgeVaultIntegration:
         assert not await bridge.load_tool("test")
         assert bridge.recycle_tools() == []
 
+    @pytest.mark.asyncio
+    async def test_bridge_attach_vault_restricted_agent_cold_init(self):
+        """受限 Agent: 白名单外工具初始 COLD
+
+        此前白名单外工具被误标 HOT（本就不可见），既占用槽位又产生
+        误导性的 recycle 日志；现在仅白名单内工具初始 HOT，其余 COLD，
+        可经 search_new_tools load → promote 提升。
+        """
+        from youmi.mcp.bridge import ToolBridge
+
+        vault = ToolVault()
+        await vault.add_tool(_make_entry("tool_a", "已授权工具"))
+        await vault.add_tool(_make_entry("tool_b", "未授权工具"))
+        await vault.add_tool(_make_entry("tool_c", "未授权工具"))
+
+        mock_client = MagicMock()
+        bridge = ToolBridge(
+            agent_id="restricted",
+            mcp_client=mock_client,
+            vault=vault,
+            allowed_tools=["tool_a"],
+        )
+        ctx = bridge.attach_vault(vault)
+
+        # 白名单内工具 HOT；白名单外工具 COLD
+        assert ctx.get_tier("tool_a") == ToolContextTier.HOT
+        assert ctx.get_tier("tool_b") == ToolContextTier.COLD
+        assert ctx.get_tier("tool_c") == ToolContextTier.COLD
+        # LLM 可见 schema 仅含白名单内 HOT 工具
+        schemas = bridge.to_openai_tools()
+        assert [s["function"]["name"] for s in schemas] == ["tool_a"]
+
+        # 白名单外工具可经 promote 提升（search_new_tools load 路径）
+        assert await ctx.promote("tool_b")
+        assert ctx.get_tier("tool_b") == ToolContextTier.HOT
+
+    @pytest.mark.asyncio
+    async def test_bridge_attach_vault_unrestricted_all_hot(self):
+        """无限制 Agent: 全部工具初始 HOT + essential 永不回收（回归保护）"""
+        from youmi.mcp.bridge import ToolBridge
+
+        vault = ToolVault()
+        await vault.add_tool(_make_entry("tool_a"))
+        await vault.add_tool(_make_entry("tool_b"))
+
+        mock_client = MagicMock()
+        bridge = ToolBridge(agent_id="free", mcp_client=mock_client, vault=vault)
+        ctx = bridge.attach_vault(vault)
+
+        # 无限制 Agent 维持全 HOT（行为不变）
+        assert ctx.get_tier("tool_a") == ToolContextTier.HOT
+        assert ctx.get_tier("tool_b") == ToolContextTier.HOT
+
+        # essential_names 中的工具为必备 — LRU 回收时跳过
+        vault2 = ToolVault()
+        await vault2.add_tool(_make_entry("coordinator", "协调工具"))
+        await vault2.add_tool(_make_entry("normal", "普通工具"))
+        bridge2 = ToolBridge(agent_id="master", mcp_client=MagicMock(), vault=vault2)
+        ctx2 = bridge2.attach_vault(vault2, essential_names={"coordinator"})
+
+        assert ctx2.get_tier("coordinator") == ToolContextTier.HOT
+        assert ctx2.get_tier("normal") == ToolContextTier.HOT
+
+        for _ in range(5):
+            ctx2.advance_turn()
+        recycled = ctx2.recycle(idle_threshold=2)
+        assert "coordinator" not in recycled  # 必备工具永不回收
+        assert "normal" in recycled
+
 
 # ===================================================================
 # 10. ToolDiscoveryConfig 测试

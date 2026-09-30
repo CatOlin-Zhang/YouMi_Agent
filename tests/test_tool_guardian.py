@@ -628,7 +628,10 @@ async def test_from_config_dir() -> None:
     check("metadata display_name", guardian.metadata.display_name == "工具记忆守护")
     check("system_prompt 非空", len(guardian.config.system_prompt) > 0)
     check("max_iterations", guardian.config.max_iterations == 10)
-    check("llm_config model", guardian.config.llm_config.model == "gpt-4o")
+    # LLM 配置已统一为本地 Ollama gpt-oss:20b（与 MasterAgent/子 Agent 一致）
+    check("llm_config model", guardian.config.llm_config.model == "gpt-oss:20b")
+    check("llm_config base_url",
+          guardian.config.llm_config.base_url == "http://localhost:11434/v1")
     check("llm_config temperature", guardian.config.llm_config.temperature == 0.3)
 
     # 初始化验证

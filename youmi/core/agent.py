@@ -175,6 +175,16 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         # 运行期间的完整消息列表 (包含 tool_calls / tool results)
         self._conversation: list[dict[str, Any]] = []
 
+        # LLM 流式监听器 (可选) — async (kind, text) -> None
+        # 设置后 _think 改用流式调用，逐块转发 reasoning/content 给消费者
+        # （GUI 用它把子 Agent 的思考过程实时渲染成气泡，见 gui/engine）
+        self._llm_stream_listener: Any | None = None
+
+        # 收敛治理状态（run() 每次开始时重置；在 __init__ 中初始化，
+        # 使 _inject_convergence_reminders 在 run() 之外也可安全调用）
+        self._consecutive_tool_failures: int = 0
+        self._budget_reminder_sent: bool = False
+
         # Hook / 插件系统 (P2: OC-5)
         self._hook_registry = HookRegistry()
         self._plugin_manager = PluginManager(self._hook_registry)
@@ -239,6 +249,16 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
     @property
     def llm_client(self) -> LLMClient | None:
         return self._llm_client
+
+    def set_llm_stream_listener(self, listener: Any | None) -> None:
+        """设置/清除 LLM 流式监听器 — async (kind: str, text: str) -> None
+
+        设置后，run() ReAct 循环中的 _think 会改用 LLMClient.chat_stream，
+        把每个 reasoning/content delta 逐块转发给监听器（kind 区分类型）。
+        监听器异常不会打断 ReAct 循环；未设置或客户端不支持流式时行为不变。
+        GUI 用此机制把子 Agent 的思考过程实时渲染成「深度思考」气泡。
+        """
+        self._llm_stream_listener = listener
 
     @property
     def env(self) -> str:
@@ -615,6 +635,10 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
         error_msg: str | None = None
         final_output: Any = None
 
+        # 收敛治理状态（每次 run 重置）
+        self._consecutive_tool_failures = 0
+        self._budget_reminder_sent = False
+
         try:
             while self._iteration_count < self._config.max_iterations:
                 self._iteration_count += 1
@@ -639,6 +663,15 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
                     # 直接回复，不需要执行 action
                     pass
 
+                # 收敛治理 — 连续工具失败 / 迭代预算尾声时注入提醒，
+                # 防止无限扩展调研不收敛。仅在循环将继续的轮次注入
+                # （respond 意味着任务即将结束，提醒已无意义，
+                # 注入只会污染 conversation）
+                self._inject_convergence_reminders(
+                    action_result,
+                    will_continue=thought.action_type != "respond",
+                )
+
                 # 4. Reflect — 评估结果
                 reflection = await self._reflect(observation, thought, action_result)
 
@@ -654,6 +687,18 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
                 # 达到最大迭代次数
                 final_output = f"达到最大迭代次数 ({self._config.max_iterations})，任务可能未完成。"
                 self._status = AgentStatus.COMPLETED
+
+        except asyncio.CancelledError:
+            # 取消 (如 run_sub_agent 工具超时被 wait_for 取消):
+            # CancelledError 是 BaseException, 不走 except Exception,
+            # 不复位的话 Agent 卡在 RUNNING, 后续 run() 报 expected 'idle'
+            self._status = AgentStatus.IDLE
+            logger.warning(
+                "Agent '%s' run cancelled (e.g. tool timeout), "
+                "status reset to IDLE",
+                self.name,
+            )
+            raise
 
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
@@ -679,6 +724,56 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
             self.name, self._status.value, self._iteration_count,
         )
         return result
+
+    def _inject_convergence_reminders(
+        self, action_result: _ActionResult, *, will_continue: bool = True,
+    ) -> None:
+        """收敛治理（run 循环内每轮调用）
+
+        长任务 Agent 容易陷入「无限调研」：失败来源反复重试、次要细节
+        不断扩展。两个触发器以 user 消息注入 conversation（下一轮 LLM
+        可见），推动其基于已有信息收敛：
+
+        1. 连续 3 次工具调用失败 → 停止同类重试，直接总结输出
+        2. 迭代预算尾声（剩余 ≤ 2 轮）→ 停止扩展新方向，开始收尾
+
+        will_continue=False（本轮已 respond，任务即将结束）时跳过 —
+        此时提醒已无意义，注入只会污染 conversation。
+        """
+        if not will_continue:
+            return
+
+        if action_result.success:
+            self._consecutive_tool_failures = 0
+        else:
+            self._consecutive_tool_failures += 1
+            if self._consecutive_tool_failures >= 3:
+                reminder = (
+                    f"【系统提示】你已连续 {self._consecutive_tool_failures} 次"
+                    "工具调用失败。请停止重复尝试同类调用，"
+                    "立即基于已收集到的信息整理并输出最终结果。"
+                )
+                self._conversation.append({"role": "user", "content": reminder})
+                # 重置计数：之后每再连败 3 次触发一档
+                self._consecutive_tool_failures = 0
+                logger.info(
+                    "Convergence: tool-failure reminder injected for '%s'",
+                    self.name,
+                )
+
+        remaining = self._config.max_iterations - self._iteration_count
+        if remaining <= 2 and not self._budget_reminder_sent:
+            reminder = (
+                f"【系统提示】你已执行 {self._iteration_count}/"
+                f"{self._config.max_iterations} 轮迭代，剩余轮次不多。"
+                "请停止扩展新的调研方向，立即基于已有信息整理并输出最终结果。"
+            )
+            self._conversation.append({"role": "user", "content": reminder})
+            self._budget_reminder_sent = True
+            logger.info(
+                "Convergence: budget reminder injected for '%s' (remaining=%d)",
+                self.name, remaining,
+            )
 
     async def _ensure_chat_initialized(self) -> None:
         """chat_turn / chat_turn_stream 共享的初始化逻辑
@@ -1292,6 +1387,52 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
 
         return _Observation(messages=conversation)
 
+    async def _call_llm(
+        self,
+        messages: list[dict[str, Any]],
+        tools_schema: list[dict[str, Any]] | None,
+    ) -> "LLMResponse":
+        """统一的 LLM 调用入口（_think 使用）
+
+        设置了流式监听器且客户端支持 chat_stream 时走流式路径，
+        逐块转发 delta；流式失败自动回退非流式（监听器是展示层增强，
+        不改变 ReAct 语义）。未设置监听器时行为与非流式完全一致。
+        """
+        listener = self._llm_stream_listener
+        if listener is None or not hasattr(self._llm_client, "chat_stream"):
+            return await self._llm_client.chat(
+                messages=messages,
+                tools=tools_schema or None,
+            )
+
+        async def _on_delta(kind: str, text: str) -> None:
+            try:
+                await listener(kind, text)
+            except Exception:
+                # 监听器异常不阻断 ReAct 循环
+                logger.debug("llm_stream_listener error", exc_info=True)
+
+        try:
+            async for _ in self._llm_client.chat_stream(
+                messages=messages,
+                tools=tools_schema or None,
+                on_delta=_on_delta,
+            ):
+                pass  # delta 已由 on_delta 转发，这里只驱动流结束
+            response = self._llm_client._last_stream_response
+            if response is not None:
+                return response
+        except Exception as exc:
+            logger.warning(
+                "LLM stream failed (%s: %s), falling back to non-stream chat",
+                type(exc).__name__, str(exc)[:200],
+            )
+        # 回退：非流式调用（含完整重试语义）
+        return await self._llm_client.chat(
+            messages=messages,
+            tools=tools_schema or None,
+        )
+
     async def _think(self, observation: _Observation) -> _Thought:
         """Think: 调用 LLM 推理，自动处理 tool_calls
 
@@ -1341,10 +1482,11 @@ class Agent(ToolExecutionMixin, MCPIntegrationMixin):
             if decision.decision == HookDecisionType.MODIFY and "messages" in decision.modified_data:
                 messages_for_llm = decision.modified_data["messages"]
 
-        # 调用 LLM
-        response: LLMResponse = await self._llm_client.chat(
-            messages=messages_for_llm,
-            tools=tools_schema or None,
+        # 调用 LLM — 设置了流式监听器且客户端支持流式时走 chat_stream，
+        # 逐块转发 reasoning/content delta（GUI 实时渲染思考过程）；
+        # 否则保持非流式行为不变
+        response: LLMResponse = await self._call_llm(
+            messages_for_llm, tools_schema,
         )
 
         # P2: OC-5 — after_model_call 钩子

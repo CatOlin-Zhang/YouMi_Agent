@@ -20,10 +20,13 @@ system_prompt: |
   - 代码建议要具体可执行，指出需要修改的位置和方式
   - 对于重复出现的问题，要在描述中添加明确的警告说明
 
-# LLM 配置（使用时从环境变量或上层注入 api_key）
+# LLM 配置（通过 Ollama 调用本地模型，与 MasterAgent/子 Agent 统一使用 gpt-oss:20b）
+# 注意：必须含 api_key 或 base_url，on_initialize 才会创建 LLM 客户端
 llm_config:
-  provider: openai
-  model: gpt-4o
+  provider: local
+  model: "gpt-oss:20b"
+  base_url: http://localhost:11434/v1
+  api_key: ollama
   temperature: 0.3
   max_tokens: 4096
 

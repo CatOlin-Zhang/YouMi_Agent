@@ -71,20 +71,36 @@ async def web_fetch(
             response.raise_for_status()
 
     except httpx.TimeoutException:
+        logger.warning("web_fetch failed: 请求超时（%ss）- %s", timeout, url)
         return f"错误: 请求超时（{timeout}s）- {url}"
     except httpx.HTTPStatusError as e:
+        logger.warning("web_fetch failed: HTTP %s - %s", e.response.status_code, url)
         return f"错误: HTTP {e.response.status_code} - {url}"
     except Exception as e:
+        logger.warning("web_fetch failed: %s - %s", e, url)
         return f"错误: 请求失败 - {e}"
 
     content_type = response.headers.get("content-type", "")
+
+    # 重定向标注: 部分站点会 301 到主题完全无关的落地页（如 statista 把
+    # 失效统计页重定向到其他内容页），必须把最终 URL 暴露给 LLM，
+    # 否则无关内容会被当作原始 URL 的数据引用
+    final_url = str(response.url)
+    if final_url != url:
+        url_header = (
+            f"[URL: {url} → 重定向到: {final_url}]\n"
+            f"[注意] 发生了重定向，实际页面主题可能与原始 URL 不同；"
+            f"若内容与需求无关，请勿将其作为该 URL 的数据引用"
+        )
+    else:
+        url_header = f"[URL: {url}]"
 
     # JSON 响应直接返回
     if "application/json" in content_type:
         text = response.text
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n... (已截断，共 {len(text)} 字符)"
-        return f"[URL: {url} | Content-Type: application/json]\n{text}"
+        return f"{url_header} | Content-Type: application/json\n{text}"
 
     # HTML 提取纯文本
     html = response.text
@@ -94,7 +110,7 @@ async def web_fetch(
         text = text[:max_chars] + f"\n... (已截断，共 {len(text)} 字符)"
 
     logger.info("web_fetch: %s → %d chars", url, len(text))
-    return f"[URL: {url}]\n{text}"
+    return f"{url_header}\n{text}"
 
 
 def _extract_text(html: str) -> str:

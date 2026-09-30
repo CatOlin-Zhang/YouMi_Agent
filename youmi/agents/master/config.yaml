@@ -60,27 +60,33 @@ system_prompt: |
   - 子 Agent 的输出会直接展示在群聊中，不要重复转述其完整内容；只需在必要时做简短衔接或引导下一步
   
 # LLM 配置（通过 Ollama 调用本地模型）
-# MasterAgent 只做问题路由和任务分发，用小模型即可（与子 Agent 的大模型共用同一 Ollama 实例）
+# MasterAgent 与子 Agent 统一使用 gpt-oss:20b（MoE，21B 总参/3.6B 激活，原生 function calling）
+# 说明：同一 Ollama 实例按 model 字段路由，Master 与子 Agent 共享同一个模型驻留实例，内存不叠加
+# 回滚方案：将 model 改回 "qwen2.5:0.5b"（轻量路由，响应快但准确率受限）并重启 GUI
 llm_config:
   provider: local
-  model: "qwen2.5:0.5b"
+  model: "gpt-oss:20b"
   base_url: http://localhost:11434/v1
   api_key: ollama
   temperature: 0.3
   max_tokens: 8192
+  # 上下文预算（Compaction 触发阈值 = 80%）。gpt-oss:20b 支持 128K 窗口，
+  # 8000 默认值会让调研类任务在中期就压缩掉已抓取的原始资料
+  max_context_tokens: 16384
 
-# 子 Agent 默认 LLM 配置（模型分级：Master 小模型路由 + 子 Agent 大模型推理）
+# 子 Agent 默认 LLM 配置
 # 优先级: youmi/agents/<role>/config.yaml 的 llm_config（需含 api_key 或 base_url）
 #       > 此处 extra.sub_agent_llm_config
 #       > 继承上方 Master 的 llm_config
 extra:
   sub_agent_llm_config:
     provider: local
-    model: "gemma3:4b"
+    model: "gpt-oss:20b"
     base_url: http://localhost:11434/v1
     api_key: ollama
     temperature: 0.4
     max_tokens: 8192
+    max_context_tokens: 16384
 
 # 记忆配置
 memory_config:

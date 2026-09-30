@@ -57,6 +57,23 @@ logger = logging.getLogger(__name__)
 # 可重试的 HTTP 状态码 — 限流(429) / 超时(408) / 服务端临时故障(5xx)
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
+# 本地地址主机名 — 这些地址的请求必须绕过系统代理环境变量
+_LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+
+
+def is_local_base_url(url: str) -> bool:
+    """判断 base_url 是否指向本机。
+
+    Clash/v2ray 等系统代理软件会把发往 localhost 的请求当作普通流量
+    路由到远程节点，导致 502 Bad Gateway。本地 LLM（Ollama 等）的
+    客户端需以 ``trust_env=False`` 创建，避免继承此类代理环境变量。
+    """
+    try:
+        host = (httpx.URL(url).host or "").lower()
+    except Exception:
+        return False
+    return host in _LOCAL_HOSTNAMES or host.startswith("127.")
+
 
 # ---------------------------------------------------------------------------
 # 响应数据结构
@@ -163,6 +180,9 @@ class LLMClient:
             base_url=self._base_url,
             headers=self._build_headers(config),
             timeout=httpx.Timeout(config.timeout_s),
+            # 本地地址绕过系统代理环境变量（Clash 等代理软件会
+            # 拦截发往 localhost 的请求并返回 502 Bad Gateway）
+            trust_env=not is_local_base_url(self._base_url),
         )
         # M1: 可靠性 — 重试策略（显式参数 > 配置 > 默认值）
         self._retry_policy: RetryPolicy = (
@@ -419,6 +439,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict | None = None,
+        on_delta: Any | None = None,
         **extra_params: Any,
     ) -> AsyncGenerator[str, None]:
         """流式调用 Chat Completions API (SSE)
@@ -426,10 +447,28 @@ class LLMClient:
         M1 增强: 连接建立阶段支持重试（已产出内容后不再重试，避免重复
         输出）；熔断保护 / OTel span / 审计日志。
 
+        推理模型 (gpt-oss / deepseek-r1 等) 的思考内容在 ``delta.reasoning``
+        (Ollama) 或 ``delta.reasoning_content`` (DeepSeek 风格 API) 中，
+        与最终回答 ``delta.content`` 分开传输。思考内容:
+
+        - 作为文本块 yield（供 chat_turn_stream 直通 GUI，前端在工具
+          卡片到达时自动降级为「深度思考」样式）
+        - 不计入 ``collected_content``（conversation 中的 assistant 消息
+          只保留最终回答，与 OpenAI 消息格式一致）
+        - 通过 ``on_delta(kind, text)`` 回调逐块通知（kind 为
+          "reasoning" / "content"），供需要区分类型的消费者使用
+
         异步生成器，逐块产出文本内容。完成后通过 .final_response 获取完整响应。
 
+        Args:
+            messages: 对话消息列表
+            tools: 工具 schema（OpenAI tools 格式）
+            tool_choice: 工具选择策略
+            on_delta: 可选异步回调 ``async (kind: str, text: str) -> None``，
+                每收到一个 delta（reasoning / content）触发一次
+
         Yields:
-            str: 文本块（仅 content delta，不含 tool_calls）
+            str: 文本块（reasoning + content delta，不含 tool_calls）
         """
         payload = self._build_payload(
             messages, tools, tool_choice, extra_params, stream=True,
@@ -442,6 +481,7 @@ class LLMClient:
         attempts = 0
         received_content = False
         collected_content: list[str] = []
+        collected_reasoning: list[str] = []
         collected_tool_calls: dict[int, dict[str, Any]] = {}
         finish_reason = ""
         usage: dict[str, Any] = {}
@@ -490,11 +530,30 @@ class LLMClient:
                             if fr:
                                 finish_reason = fr
 
+                            # 思考内容（推理模型: Ollama 用 reasoning，
+                            # DeepSeek 风格 API 用 reasoning_content）
+                            reasoning = (
+                                delta.get("reasoning")
+                                or delta.get("reasoning_content")
+                                or ""
+                            )
+                            if reasoning:
+                                collected_reasoning.append(reasoning)
+                                received_content = True
+                                if on_delta is not None:
+                                    await on_delta("reasoning", reasoning)
+                                yield reasoning
+
                             # 文本内容
                             content = delta.get("content", "")
                             if content:
+                                if collected_reasoning and not collected_content:
+                                    # 思考与最终回答之间插入空行分隔
+                                    yield "\n\n"
                                 collected_content.append(content)
                                 received_content = True
+                                if on_delta is not None:
+                                    await on_delta("content", content)
                                 yield content
 
                             # 工具调用（累积 delta）
@@ -525,6 +584,7 @@ class LLMClient:
                             and attempts <= self._retry_policy.max_retries):
                         # 重置半途累积状态，避免重试后数据混杂
                         collected_content.clear()
+                        collected_reasoning.clear()
                         collected_tool_calls.clear()
                         finish_reason = ""
                         usage = {}
@@ -596,6 +656,10 @@ class LLMClient:
                          "finish_reason": finish_reason}],
             "usage": usage,
         }
+        if collected_reasoning:
+            # 思考内容挂在 message 上（LLMResponse.raw_message 不包含它，
+            # 不污染 conversation；供日志/调试与后续扩展使用）
+            raw["choices"][0]["message"]["reasoning"] = "".join(collected_reasoning)
         if tool_calls_list:
             raw["choices"][0]["message"]["tool_calls"] = tool_calls_list
 

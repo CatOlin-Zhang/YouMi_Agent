@@ -513,7 +513,11 @@ class ToolBridge:
         必备工具 (永不回收) 规则:
         - 显式传入的 essential_names (如 Master 的协调器工具)
         - 当前白名单 allowed_tools（创建时被赋予的工具权限）
-        其余 Vault 工具初始为 HOT（可见性仍受白名单过滤）。
+        初始层级:
+        - 无限制 Agent: 其余 Vault 工具初始为 HOT
+        - 受限 Agent (allowed_tools 非空): 白名单外工具初始为 COLD
+          （它们本就不可见，标记 HOT 只会占用槽位并产生误导性的
+          recycle 日志；search_new_tools load 加载时会经 promote 提升）
         幂等：重复调用不会重建已有上下文。
 
         Args:
@@ -530,11 +534,13 @@ class ToolBridge:
         self._cone = None
         if self._context is None:
             essential = set(essential_names or set())
+            hot_names: set[str] | None = None
             if self._allowed_tools:
                 essential |= set(self._allowed_tools)
+                hot_names = set(self._allowed_tools)
 
             ctx = AgentToolContext(agent_id=self._agent_id, vault=vault)
-            ctx.init_tools(essential_names=essential)
+            ctx.init_tools(essential_names=essential, hot_names=hot_names)
             self._context = ctx
             logger.debug(
                 "ToolBridge[%s]: attached vault (%d tools, %d essential)",

@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from youmi._vec_utils import cosine_similarity_python as _cosine_similarity
+from youmi.llm.client import is_local_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,9 @@ class EmbeddingClient:
             base_url=self._base_url,
             headers=headers,
             timeout=httpx.Timeout(timeout),
+            # 本地地址绕过系统代理环境变量（Clash 等代理软件会
+            # 拦截发往 localhost 的请求并返回 502 Bad Gateway）
+            trust_env=not is_local_base_url(self._base_url),
         )
 
     # ------------------------------------------------------------------

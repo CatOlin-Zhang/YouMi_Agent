@@ -57,6 +57,22 @@ class GUIHookBridge:
         self._injected.add(aid)
         logger.info("GUI hooks 已注入 Agent '%s'", agent.name)
 
+    def attach_stream_listener(self, agent: Any) -> None:
+        """为 Agent 设置 LLM 流式监听器 — 思考过程实时渲染为独立气泡。
+
+        只转发 reasoning delta：content（最终回答）由 run_sub_agent 的
+        结果气泡统一展示，避免同一段文本出现两次。reasoning 段被
+        BEFORE_TOOL_CALL 切断后，前端自动降级为「深度思考」折叠样式。
+        """
+        bridge = self.bridge
+
+        async def _on_llm_delta(kind: str, text: str) -> None:
+            if kind != "reasoning" or not text:
+                return
+            bridge.stream_agent_delta(agent.agent_id, agent.name, text)
+
+        agent.set_llm_stream_listener(_on_llm_delta)
+
     # ------------------------------------------------------------------
     # 钩子实现
     # ------------------------------------------------------------------

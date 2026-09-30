@@ -327,6 +327,9 @@ RUN_SUB_AGENT_DEF = ToolDefinition(
         "必须先通过 create_sub_agent 创建后才能运行。"
         "示例：run_sub_agent({\"agent_id\": \"abc123\"})"
     ),
+    # 子 Agent 是完整 ReAct 循环（多轮 LLM + 工具），远超普通工具耗时；
+    # 180s 全局默认会在任务中途强杀子 Agent 导致前功尽弃，独立放宽到 15 分钟
+    timeout_s=900.0,
     parameters=[
         ToolParameter(
             name="agent_id",

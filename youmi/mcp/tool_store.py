@@ -297,17 +297,22 @@ class ToolStore:
         self._conn = await asyncio.to_thread(
             sqlite3.connect, self._db_path, check_same_thread=False,
         )
-        await asyncio.to_thread(self._conn.execute, "PRAGMA foreign_keys = ON;")
+        # 迁移期间关闭外键约束 (重建 tools 表时需 DROP 被引用的父表),
+        # 迁移完成后重新开启
+        await asyncio.to_thread(self._conn.execute, "PRAGMA foreign_keys = OFF;")
+        # 先加载 sqlite-vec: 旧库迁移可能需要 DROP vec0 虚拟表,
+        # 模块未加载时 DROP 会报 "no such module"
+        self._vec_available = await asyncio.to_thread(
+            try_load_sqlite_vec, self._conn,
+        )
         # 旧库升级必须先于 executescript: _CREATE_TABLES_SQL 含
         # idx_tools_lineage 索引, 旧库缺 lineage_id 列时先建索引会失败
         await asyncio.to_thread(self._migrate_schema, self._conn)
         await asyncio.to_thread(self._conn.executescript, _CREATE_TABLES_SQL)
-        await asyncio.to_thread(self._conn.commit)
-
-        # 尝试加载 sqlite-vec 扩展
-        self._vec_available = await asyncio.to_thread(
-            try_load_sqlite_vec, self._conn,
+        await asyncio.to_thread(
+            self._conn.execute, "PRAGMA foreign_keys = ON;"
         )
+        await asyncio.to_thread(self._conn.commit)
         if self._vec_available:
             dim = self._embedding_dim
             # 双层向量索引: L1 摘要向量 + L2 摘要的摘要向量 (薄层初筛)
@@ -345,6 +350,67 @@ class ToolStore:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(tools)").fetchall()}
         if not columns:
             return  # tools 表不存在 (异常情况, 不处理)
+
+        # 旧库缺自增 id 列 (PK 为 tool_id) → 重建表补齐。
+        # vec0 KNN 以 ``t.id = v.rowid`` JOIN, upsert 后以 rowid=tools.id
+        # 写入向量索引, 因此 id 列无法用 ALTER 补 (SQLite 不能 ALTER 加主键列)。
+        # 重建后 id = 旧行 rowid; vec0 索引的 rowid 无法保证与旧 rowid 对齐
+        # → 一并删除, 启动时 ToolVault 重新导入并幂等再生成 embedding。
+        if "id" not in columns:
+            conn.executescript("""
+                CREATE TABLE tools_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_id TEXT UNIQUE NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    version TEXT NOT NULL DEFAULT '0.0.1',
+                    parent_version_id TEXT,
+                    provider_id TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
+                    definition_json TEXT NOT NULL,
+                    handler_module TEXT DEFAULT '',
+                    language TEXT DEFAULT 'python',
+                    runtime TEXT DEFAULT 'python',
+                    essential INTEGER DEFAULT 0,
+                    risk_level TEXT DEFAULT 'low',
+                    required_permissions TEXT DEFAULT '[]',
+                    lineage_id TEXT DEFAULT '',
+                    summary_l2 TEXT DEFAULT '',
+                    branch TEXT DEFAULT 'main',
+                    is_head INTEGER DEFAULT 1,
+                    diff_patch TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO tools_new (id, tool_id, tool_name, version,
+                    parent_version_id, provider_id, summary, definition_json,
+                    handler_module, language, runtime, essential, risk_level,
+                    required_permissions, lineage_id, summary_l2, branch,
+                    is_head, diff_patch, created_at, updated_at)
+                    SELECT rowid, tool_id, tool_name, version,
+                    parent_version_id, provider_id, summary, definition_json,
+                    handler_module, language, runtime, essential,
+                    COALESCE(risk_level, 'low'),
+                    COALESCE(required_permissions, '[]'),
+                    COALESCE(lineage_id, tool_name),
+                    COALESCE(summary_l2, ''), COALESCE(branch, 'main'),
+                    COALESCE(is_head, 1), COALESCE(diff_patch, ''),
+                    created_at, updated_at
+                    FROM tools;
+                DROP TABLE tools;
+                ALTER TABLE tools_new RENAME TO tools;
+            """)
+            # 向量索引 (vec0 虚拟表 + JSON 降级表) rowid/关联失效 → 清空重建
+            for vt in ("vec_tools_idx", "vec_tools_l2_idx", "vec_tools"):
+                conn.execute(f"DROP TABLE IF EXISTS {vt}")
+            conn.commit()
+            logger.info(
+                "ToolStore: rebuilt tools table with autoincrement 'id' column "
+                "and cleared stale vector indexes"
+            )
+            # 重建后的表已含全部列, 后续 ALTER 迁移为空操作
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(tools)").fetchall()
+            }
 
         migrations = [
             ("risk_level", "ALTER TABLE tools ADD COLUMN risk_level TEXT DEFAULT 'low'"),

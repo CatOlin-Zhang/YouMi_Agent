@@ -111,6 +111,14 @@ class ToolDefinition(BaseModel):
         default_factory=list,
         description="调用所需权限标识 (如 ['fs:write', 'net:http'], 空=无门槛)",
     )
+    timeout_s: float | None = Field(
+        default=None,
+        description=(
+            "工具级执行超时（秒）。None 时使用全局默认"
+            "（YOUMI_TOOL_TIMEOUT_S，默认 180s）。"
+            "长任务编排类工具（如 run_sub_agent）应设置更大的独立超时"
+        ),
+    )
 
     def to_openai_function_schema(self) -> dict[str, Any]:
         """生成 OpenAI function calling 的 tool 定义"""

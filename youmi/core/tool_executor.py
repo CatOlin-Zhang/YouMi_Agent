@@ -125,14 +125,14 @@ class ToolExecutionMixin:
         治理职责:
         - 熔断保护: 按 ``tool:<name>`` 隔离，连续失败达阈值后快速失败
           （以失败结果返回，不打断 ReAct 循环）
-        - 超时兜底: ``YOUMI_TOOL_TIMEOUT_S``（默认 180s），
-          工具自身超时参数更小时以更小者为准
+        - 超时兜底: 工具级 ``ToolDefinition.timeout_s`` 优先（如
+          run_sub_agent 的 900s），否则 ``YOUMI_TOOL_TIMEOUT_S``（默认 180s）
         - 可观测性: ``tool.call`` span + ``tool_call`` 审计事件
 
         实际执行委托给 ``_dispatch_tool``（MCP / ToolRegistry 双路径）。
         """
         breaker = get_breaker_registry().get(f"tool:{name}")
-        timeout_s = get_tool_timeout_s()
+        timeout_s = self._resolve_tool_timeout_s(name)
         audit = get_audit_logger()
         start = time.monotonic()
 
@@ -208,6 +208,42 @@ class ToolExecutionMixin:
                 error=action.error or "",
             )
             return action
+
+    def _resolve_tool_timeout_s(self, name: str) -> float:
+        """解析工具执行超时（秒）
+
+        优先级: ToolDefinition.timeout_s（Vault 条目 → ToolRegistry）
+        > 全局默认（YOUMI_TOOL_TIMEOUT_S，默认 180s）。
+
+        长任务编排类工具（run_sub_agent 等聚合调用）在定义中声明独立的
+        更大超时，避免被全局一刀切超时中途强杀；普通工具不声明则维持
+        全局默认不变。
+        """
+        base = get_tool_timeout_s()
+        definitions: list[Any] = []
+
+        # 路径 1: MCP ToolBridge → Vault 条目（子 Agent 经 MCP 调用的工具）
+        bridge = getattr(self, "_tool_bridge", None)
+        vault = getattr(bridge, "_vault", None)
+        if vault is not None:
+            entry = vault.get_entry(name)
+            if entry is not None:
+                definitions.append(entry.definition)
+
+        # 路径 2: ToolRegistry（Agent 自己注册的工具定义，内存中始终最新）
+        # getattr 防御: 测试桩 / 简化 registry 可能未实现 get_definition
+        registry = getattr(self, "_tool_registry", None)
+        get_defn = getattr(registry, "get_definition", None)
+        if callable(get_defn):
+            defn = get_defn(name)
+            if defn is not None:
+                definitions.append(defn)
+
+        for defn in definitions:
+            per_tool = getattr(defn, "timeout_s", None)
+            if per_tool:
+                return float(per_tool)
+        return base
 
     def _audit_tool_call(
         self,

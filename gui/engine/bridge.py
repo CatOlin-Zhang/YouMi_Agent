@@ -175,6 +175,11 @@ class EngineBridge:
                     logger.warning("子 Agent '%s' 总线接入失败: %s", agent.name, exc)
 
             bridge.hook_bridge.inject(agent)  # 显式注入 GUI hooks
+            # 思考流实时渲染: 子 Agent run() 期间的 reasoning delta
+            # 逐块流式输出为独立气泡（前端在工具卡片到达时自动降级为
+            # 「深度思考」样式），Master 无需此机制（chat_turn_stream
+            # 自带流式）
+            bridge.hook_bridge.attach_stream_listener(agent)
             task = kwargs.get("task", "")
             bridge.on_sub_agent_created(agent, role, task)
             # 注意：tracker 通知由 coordinator_ops 工具函数统一处理，
@@ -194,6 +199,9 @@ class EngineBridge:
                 return await original(agent_id)
             finally:
                 bridge.update_agent_status(agent_id, "idle")
+                # 收尾该子 Agent 遗留的思考流气泡（结果气泡由
+                # run_sub_agent 内部广播并即时关闭，不受影响）
+                bridge.split_agent_stream(agent_id)
 
         self.master.run_sub_agent = patched
 
@@ -308,6 +316,34 @@ class EngineBridge:
                 and rec.kind == "text"
             ):
                 self.close_message(msg_id)
+
+    def stream_agent_delta(self, agent_id: str, agent_name: str, text: str) -> None:
+        """把某 Agent 的 LLM 流式 delta 追加到其文本气泡（无则新开）。
+
+        子 Agent 思考流（set_llm_stream_listener → reasoning delta）的
+        GUI 落点：优先复用该 Agent 当前打开的文本气泡（BEFORE_TOOL_CALL
+        会切断旧段，之后的首个 delta 自动开新段，与 Master 的流式段
+        管理语义一致）。
+        """
+        session_id = self.active_session_id
+        if not session_id or not text:
+            return
+        for msg_id, rec in list(self._open.items()):
+            if (
+                rec.agent_id == agent_id
+                and rec.role == "assistant"
+                and rec.kind == "text"
+            ):
+                self.append_chunk(msg_id, text)
+                return
+        card = self.card_for(agent_id, agent_name)
+        rec = MessageRecord(
+            msg_id=new_id("think"), session_id=session_id,
+            agent_id=agent_id, agent_name=card.name,
+            role="assistant", kind="text", text="",
+        )
+        self.open_message(rec)
+        self.append_chunk(rec.msg_id, text)
 
     def _open_master_msg(self, session_id: str, card: AgentCard) -> str:
         """开启一段 Master 流式文本消息，返回 msg_id。"""

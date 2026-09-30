@@ -23,6 +23,7 @@ from youmi.core.resilience import (
     CircuitBreakerRegistry,
     CircuitState,
 )
+from youmi.core.tool import ToolDefinition
 from youmi.core.tool_executor import ToolExecutionMixin
 from youmi.observability import AuditLogger
 
@@ -286,3 +287,86 @@ class TestMcpPath:
         ev = audit.get_recent(event_type="tool_call")[0]
         assert ev.status == "error"
         assert "bridge 崩溃" in ev.error
+
+
+# ---------------------------------------------------------------------------
+# 工具级超时 (ToolDefinition.timeout_s)
+# ---------------------------------------------------------------------------
+
+class TestPerToolTimeout:
+    """工具级超时解析 — ToolDefinition.timeout_s 覆盖全局默认
+
+    背景: run_sub_agent 是完整 ReAct 循环，此前被 YOUMI_TOOL_TIMEOUT_S
+    全局默认 180s 一刀切超时中途强杀；ToolDefinition.timeout_s 允许
+    长任务编排类工具声明独立超时，普通工具不受影响。
+    """
+
+    async def test_registry_definition_overrides_default(self, gov, monkeypatch):
+        monkeypatch.setenv("YOUMI_TOOL_TIMEOUT_S", "5")
+
+        class _Registry(_FakeRegistry):
+            def get_definition(self, name):
+                if name == "run_sub_agent":
+                    return ToolDefinition(
+                        name=name, description="长任务编排",
+                        timeout_s=900.0,
+                    )
+                return None
+
+        agent = _FakeAgent(tool_registry=_Registry())
+        # 工具级超时优先于全局默认
+        assert agent._resolve_tool_timeout_s("run_sub_agent") == 900.0
+        # 未声明的工具回退全局默认
+        assert agent._resolve_tool_timeout_s("file_read") == 5.0
+
+    async def test_vault_entry_overrides_default(self, gov, monkeypatch):
+        from youmi.mcp.vault import ToolVault, ToolEntry
+
+        monkeypatch.setenv("YOUMI_TOOL_TIMEOUT_S", "5")
+        vault = ToolVault()
+        await vault.add_tool(ToolEntry(
+            tool_name="web_fetch",
+            definition=ToolDefinition(
+                name="web_fetch", description="抓取网页",
+                timeout_s=60.0,
+            ),
+        ))
+
+        class _VaultBridge:
+            """携带 _vault 的最小 bridge 桩（MCP 路径超时解析用）"""
+
+            def __init__(self, vault) -> None:
+                self._vault = vault
+
+        agent = _FakeAgent(bridge=_VaultBridge(vault))
+        assert agent._resolve_tool_timeout_s("web_fetch") == 60.0
+        # Vault 中不存在的工具回退全局默认
+        assert agent._resolve_tool_timeout_s("missing") == 5.0
+
+    async def test_registry_without_get_definition_falls_back(self, gov, monkeypatch):
+        """回归: 简化 registry（如测试桩）无 get_definition 时不抛异常"""
+        monkeypatch.setenv("YOUMI_TOOL_TIMEOUT_S", "7")
+        agent = _FakeAgent(tool_registry=_FakeRegistry())
+        assert agent._resolve_tool_timeout_s("file_read") == 7.0
+
+    async def test_per_tool_timeout_applied_in_execution(self, gov, monkeypatch):
+        """工具级超时作用于实际执行（覆盖全局默认的大超时）"""
+        monkeypatch.setenv("YOUMI_TOOL_TIMEOUT_S", "30")  # 全局 30s
+
+        class _Registry(_FakeRegistry):
+            def get_definition(self, name):
+                return ToolDefinition(name=name, description="慢工具", timeout_s=0.1)
+
+        async def slow(args):
+            await asyncio.sleep(5)
+
+        agent = _FakeAgent(tool_registry=_Registry(slow))
+        action = await agent._do_execute_tool("slow_tool", {}, "c1")
+
+        assert not action.success
+        assert "超时" in action.error
+        # 用的是 0.1s 工具级超时（显示为 >0s），而非 30s 全局默认
+        assert ">0s" in action.error
+
+        ev = gov[1].get_recent(event_type="tool_call")[0]
+        assert ev.status == "error"
