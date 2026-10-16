@@ -108,6 +108,27 @@ export function initUI() {
 }
 
 // ===========================================================================
+// 总线治理消息（tool_request / tool_response / feedback → 系统行）
+// ===========================================================================
+function onAgentMessage(ev) {
+  // 仅渲染当前会话的消息（无 session_id 的全局广播除外）
+  if (ev.session_id && Store.activeSessionId && ev.session_id !== Store.activeSessionId) {
+    return;
+  }
+  const who = ev.from_agent_name || ev.from_agent_id || "?";
+  const to = ev.to_agent_id || "broadcast";
+  let text = (ev.content || "").trim();
+  // JSON 负载截断展示，避免刷屏
+  if (text.startsWith("{")) {
+    text = text.length > 120 ? text.slice(0, 120) + "…" : text;
+  } else if (text.length > 300) {
+    text = text.slice(0, 300) + "…";
+  }
+  const icon = ev.msg_type === "feedback" ? "🛠" : "📨";
+  appendSystemLine(`${icon} [${ev.msg_type}] ${who} → ${to}: ${text}`);
+}
+
+// ===========================================================================
 // 事件分发（来自 WebSocket，由 app.js 转发）
 // ===========================================================================
 export function handleEvent(ev) {
@@ -148,6 +169,10 @@ export function handleEvent(ev) {
       break;
 
     case "typing":
+      break;
+
+    case "agent_message":
+      onAgentMessage(ev);
       break;
 
     case "workflow_step":

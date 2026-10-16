@@ -21,8 +21,12 @@
          ├── ToolStore（SQLite 持久化：tools + vec_tools + changelogs）
          ├── ToolVault（内存缓存 + 语义搜索，底层委托 ToolStore）
          ├── EmbeddingClient（Ollama /v1/embeddings 生成工具向量）
+         ├── SkillStore + SkillIngestor（SOP 知识库，与 Tool 库并行）
+         ├── AuditGate（召回审计闸门，注入每个 Agent 的 ToolBridge）
+         ├── CallPathRouter（SKILL→root / DIRECT→head 版本分流）
          ├── connect_agent() → 为每个 Agent 创建独立 MCPClient + ToolBridge
-         │    （附带 Vault + search_new_tools 元工具）
+         │    （附带 Vault + search_new_tools 元工具 + AuditGate）
+         ├── ingest_skill()/search_skills() → 供 REST API /api/skills 调用
          └── list_tools() → 供 REST API /api/tools 调用
 
 默认模式（sqlite-vec 方案）：
@@ -56,6 +60,9 @@ class MCPService:
         db_path: ToolStore 数据库路径
         embedding_base_url: Embedding API 基础 URL
         embedding_model: Embedding 模型名称
+        skill_enabled: 是否启用 SkillStore + SkillIngestor SOP 知识库
+        skill_db_path: SkillStore 数据库路径（默认 ".youmi_skills.db"）
+        risk_threshold: AuditGate 风险阈值（超过此级别转人工审批）
     """
 
     def __init__(
@@ -64,6 +71,9 @@ class MCPService:
         db_path: str = "",
         embedding_base_url: str = "http://localhost:11434/v1",
         embedding_model: str = "nomic-embed-text",
+        skill_enabled: bool = True,
+        skill_db_path: str = "",
+        risk_threshold: str = "high",
     ) -> None:
         self._server: Any = None           # MCPServer
         self._provider: Any = None         # BuiltinToolProvider
@@ -75,6 +85,15 @@ class MCPService:
         self._embedding_base_url: str = embedding_base_url
         self._embedding_model: str = embedding_model
         self._initialized: bool = False
+        # Skill 知识库（SOP 流程知识，与 Tool 库并行）
+        self._skill_enabled: bool = skill_enabled
+        self._skill_db_path: str = skill_db_path
+        self._skill_store: Any = None      # SkillStore
+        self._skill_ingestor: Any = None   # SkillIngestor
+        # 召回治理三件套
+        self._audit_gate: Any = None       # AuditGate
+        self._version_router: Any = None   # CallPathRouter
+        self._risk_threshold: str = risk_threshold
 
     @property
     def server(self) -> Any:
@@ -89,6 +108,31 @@ class MCPService:
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def skill_store(self) -> Any:
+        """SkillStore 实例（可能为 None）"""
+        return self._skill_store
+
+    @property
+    def skill_ingestor(self) -> Any:
+        """SkillIngestor 实例（可能为 None）"""
+        return self._skill_ingestor
+
+    @property
+    def audit_gate(self) -> Any:
+        """AuditGate 召回审计闸门（可能为 None）"""
+        return self._audit_gate
+
+    @property
+    def version_router(self) -> Any:
+        """CallPathRouter 版本分流器（可能为 None）"""
+        return self._version_router
+
+    @property
+    def embedding_client(self) -> Any:
+        """EmbeddingClient 实例（可能为 None；供 GlobalMemory 等复用）"""
+        return self._embedding_client
 
     # ------------------------------------------------------------------
     # 初始化
@@ -135,6 +179,27 @@ class MCPService:
             if self._vault is not None:
                 self._server._vault = self._vault
 
+        # 4b. Skill 知识库初始化（SOP 流程知识，与 Tool 库并行）
+        if self._skill_enabled:
+            await self._init_skill_store()
+
+        # 4c. 召回治理：AuditGate（权限 BLOCK / 风险 MANUAL / 其余 PASS）
+        #     + CallPathRouter（SKILL→root 版本 / DIRECT→head 版本分流）
+        from youmi.mcp.audit_gate import AuditGate
+        from youmi.mcp.version_router import CallPathRouter
+
+        self._audit_gate = AuditGate(
+            approval_manager=getattr(master, "_approval_manager", None),
+            risk_threshold=self._risk_threshold,
+        )
+        self._version_router = CallPathRouter(
+            store=self._store, skill_store=self._skill_store,
+        )
+        logger.info(
+            "召回治理已启用: audit_gate=%s, version_router=%s",
+            self._audit_gate, self._version_router,
+        )
+
         # 6. 为 MasterAgent 连接 MCP
         #    connect_mcp() 内部会创建 MCPClient + ToolBridge，
         #    并将已有 ToolRegistry 工具迁移到 Provider。
@@ -170,6 +235,11 @@ class MCPService:
                 if agent_provider is not None else None
             )
             master._tool_bridge.attach_vault(self._vault, essential_names=essential)
+
+        # 9. 将 AuditGate 注入 Master 的 ToolBridge（召回审计拦截：
+        #    search_new_tools 的 load 路径与 search_and_confirm 均生效）
+        if self._audit_gate is not None and master._tool_bridge is not None:
+            master._tool_bridge.set_audit_gate(self._audit_gate)
 
         self._initialized = True
         logger.info(
@@ -236,6 +306,39 @@ class MCPService:
             )
         except Exception as exc:
             logger.warning("ToolVault 工具导入失败: %s", exc)
+
+    async def _init_skill_store(self) -> None:
+        """初始化 SkillStore + SkillIngestor（SOP 流程知识库）。
+
+        与 ToolStore 并行、结构镜像：复用同一个 EmbeddingClient
+        （Ollama 不可用时降级为关键词检索）。任何失败不阻塞 MCP
+        主流程，仅放弃 Skill 能力。
+        """
+        # SkillStore 初始化失败（如目录不可写）时保持 None 优雅降级
+        store = None
+        try:
+            from youmi.mcp.skill_store import SkillStore
+            db_path = self._skill_db_path or ".youmi_skills.db"
+            store = SkillStore(
+                db_path=db_path,
+                embedding_client=self._embedding_client,
+            )
+            await store.initialize()
+            logger.info("SkillStore 已初始化: %s", db_path)
+        except Exception as exc:
+            logger.warning("SkillStore 初始化失败，Skill 能力降级: %s", exc)
+            store = None
+
+        self._skill_store = store
+
+        if store is not None:
+            try:
+                from youmi.mcp.skill_ingest import SkillIngestor
+                self._skill_ingestor = SkillIngestor(skill_store=store)
+                logger.info("SkillIngestor 已就绪 (store=%s)", db_path)
+            except Exception as exc:
+                logger.warning("SkillIngestor 创建失败: %s", exc)
+                self._skill_ingestor = None
 
     async def _import_agent_tools_to_vault(self, agent_provider: Any) -> None:
         """将 Agent 级工具（协调器工具等）导入 Vault。
@@ -320,11 +423,17 @@ class MCPService:
         if self._vault is not None and agent._tool_bridge is not None:
             agent._tool_bridge.attach_vault(self._vault)
 
+        # 注入召回审计闸门（search_new_tools 的 load 路径生效：
+        # 权限不满足 BLOCK / 风险超阈值 MANUAL 转人工）
+        if self._audit_gate is not None and agent._tool_bridge is not None:
+            agent._tool_bridge.set_audit_gate(self._audit_gate)
+
         logger.info(
-            "子 Agent '%s' 已接入 MCP (allowed=%s, vault=%s)",
+            "子 Agent '%s' 已接入 MCP (allowed=%s, vault=%s, audit=%s)",
             agent.name,
             allowed_tools or "*",
             'yes' if self._vault else 'no',
+            'yes' if self._audit_gate else 'no',
         )
 
     # ------------------------------------------------------------------
@@ -365,11 +474,122 @@ class MCPService:
         return self._server.stats
 
     # ------------------------------------------------------------------
+    # Skill 知识库（供 REST API /api/skills 和前端面板使用）
+    # ------------------------------------------------------------------
+
+    async def ingest_skill(self, skill_doc: str | dict[str, Any]) -> dict[str, Any]:
+        """解析并入库一份 SOP Skill 文档。
+
+        Args:
+            skill_doc: Markdown 文本（含/不含 frontmatter）或显式字段 dict
+
+        Returns:
+            入库结果 {"ok", "skill", "error"}；Skill 库未启用时 ok=False
+        """
+        if self._skill_ingestor is None:
+            return {"ok": False, "error": "Skill 库未启用或初始化失败"}
+        try:
+            entry = await self._skill_ingestor.ingest(skill_doc)
+            return {"ok": True, "skill": self._skill_entry_to_dict(entry)}
+        except Exception as exc:
+            logger.warning("Skill 入库失败: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    async def search_skills(
+        self,
+        query: str,
+        top_k: int = 5,
+        tags: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """锥形检索 Skill（语义 ∩ tag ∩ 风险边界）。
+
+        Args:
+            query: 自然语言查询
+            top_k: 返回数量
+            tags: tag 边界过滤（None = 不限）
+
+        Returns:
+            [{"skill_name", "score", "summary", "bound_tool_name",
+              "risk_level", "tags", ...}]；Skill 库未启用时返回空列表
+        """
+        if self._skill_store is None:
+            return []
+        try:
+            results = await self._skill_store.search_cone(
+                query, top_k=top_k, tags=tags,
+            )
+            return [
+                {
+                    "skill_name": r.skill_name,
+                    "score": round(r.score, 4),
+                    "summary": r.summary,
+                    "summary_l2": r.summary_l2,
+                    "version": r.version,
+                    "bound_tool_name": r.bound_tool_name,
+                    "risk_level": r.risk_level,
+                    "tags": r.tags,
+                }
+                for r in results
+            ]
+        except Exception as exc:
+            logger.warning("Skill 检索失败: %s", exc)
+            return []
+
+    async def get_skill(self, skill_name: str) -> dict[str, Any] | None:
+        """按名称获取单个 Skill 详情（含 SOP 全文）。"""
+        if self._skill_store is None:
+            return None
+        try:
+            entry = await self._skill_store.get_skill(skill_name)
+            if entry is None:
+                return None
+            return self._skill_entry_to_dict(entry)
+        except Exception as exc:
+            logger.warning("Skill 查询失败: %s", exc)
+            return None
+
+    async def get_skill_stats(self) -> dict[str, Any]:
+        """Skill 库统计信息（未启用时 enabled=False）。"""
+        if self._skill_store is None:
+            return {"enabled": False, "skills": 0}
+        try:
+            stats = await self._skill_store.stats()
+            stats["enabled"] = True
+            return stats
+        except Exception:
+            return {"enabled": True, "skills": 0}
+
+    @staticmethod
+    def _skill_entry_to_dict(entry: Any) -> dict[str, Any]:
+        """SkillEntry → REST 友好 dict。"""
+        return {
+            "skill_name": entry.skill_name,
+            "version": entry.version,
+            "bound_tool_name": entry.bound_tool_name,
+            "describe": entry.describe,
+            "summary": entry.summary,
+            "summary_l2": entry.summary_l2,
+            "tags": entry.tags,
+            "risk_level": entry.risk_level,
+            "created_at": entry.created_at,
+            "updated_at": entry.updated_at,
+        }
+
+    # ------------------------------------------------------------------
     # 清理
     # ------------------------------------------------------------------
 
     async def shutdown(self) -> None:
-        """关闭 MCP 服务，释放 Vault/Store/Embedding 资源。"""
+        """关闭 MCP 服务，释放 Vault/SkillStore/Store/Embedding 资源。"""
+        # 关闭 SkillStore（与 ToolStore 并行的 SOP 知识库）
+        if self._skill_store is not None:
+            try:
+                await self._skill_store.close()
+            except Exception:
+                pass
+            self._skill_store = None
+            self._skill_ingestor = None
+
         # 关闭 EmbeddingClient
         if self._embedding_client is not None:
             try:
@@ -387,6 +607,7 @@ class MCPService:
             self._store = None
 
         self._vault = None
+        self._version_router = None
 
         # 关闭 MCPServer
         if self._server is not None:

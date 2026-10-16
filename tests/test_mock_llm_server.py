@@ -337,8 +337,10 @@ class TestPathsAndLifecycle:
             # 重复 start 幂等
             await srv.start()
             assert srv.port == port
-        # 停止后端口不再接受连接（Windows 下可能表现为连接超时而非拒绝）
-        with pytest.raises((httpx.ConnectError, httpx.ConnectTimeout)):
+        # 停止后端口不再接受连接。Windows 下可能表现为超时而非拒绝：
+        # 系统代理拦截 127.0.0.1 时连接建立到代理但无响应 → ReadTimeout，
+        # 故用 TimeoutException 基类覆盖 Connect/Read 等全部超时形态。
+        with pytest.raises((httpx.ConnectError, httpx.TimeoutException)):
             async with httpx.AsyncClient(timeout=2) as http:
                 await http.get(f"http://127.0.0.1:{port}/health")
 

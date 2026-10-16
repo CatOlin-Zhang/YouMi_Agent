@@ -494,6 +494,18 @@ class MockEngineBridge:
         """返回 mock 统计信息。"""
         return {"providers": 1, "tools": 3, "calls": 0, "errors": 0}
 
+    async def search_skills(self, query: str, top_k: int = 5) -> list[dict]:
+        """Skill 库检索（mock 模式返回空列表，保持与 EngineBridge 同签名）。"""
+        return []
+
+    async def get_skill_stats(self) -> dict:
+        """Skill 库统计（mock 模式未启用）。"""
+        return {"enabled": False, "skills": 0}
+
+    async def ingest_skill(self, skill_doc: str) -> dict:
+        """Skill 入库（mock 模式直接拒绝，保持与 EngineBridge 同签名）。"""
+        return {"ok": False, "error": "mock 模式未启用 Skill 库"}
+
     async def shutdown(self) -> None:
         """mock 关闭（无实际操作）。"""
         logger.info("MockEngineBridge 已关闭")

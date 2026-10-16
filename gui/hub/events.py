@@ -81,6 +81,34 @@ def typing(session_id: str, agent_id: str, on: bool) -> dict:
     return _ev("typing", session_id=session_id, agent_id=agent_id, on=on)
 
 
+# ---- 总线消息转发（治理类：tool_request / tool_response / feedback）----
+def agent_message(
+    from_agent_id: str,
+    from_agent_name: str,
+    to_agent_id: str,
+    msg_type: str,
+    content: str,
+    session_id: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    """消息总线上治理类消息的转发（EngineBridge 观察者回调构造）。
+
+    与 MESSAGE_SENDING 钩子渲染的聊天气泡互补：本事件只承载
+    TOOL_REQUEST / TOOL_RESPONSE / FEEDBACK 等不经聊天链路的消息，
+    前端以系统行样式展示。
+    """
+    return _ev(
+        "agent_message",
+        session_id=session_id,
+        from_agent_id=from_agent_id,
+        from_agent_name=from_agent_name,
+        to_agent_id=to_agent_id,
+        msg_type=msg_type,
+        content=content,
+        metadata=metadata or {},
+    )
+
+
 def error(message: str, session_id: str | None = None) -> dict:
     return _ev("error", message=message, session_id=session_id)
 

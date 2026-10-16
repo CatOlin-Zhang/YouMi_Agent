@@ -33,6 +33,7 @@ from gui.engine.mcp_service import MCPService
 from gui.engine.tracker import WorkflowTracker
 from gui.hub.events import (
     agent_join,
+    agent_message,
     agent_update,
     error,
     history,
@@ -69,6 +70,13 @@ class EngineBridge:
         self.tracker: WorkflowTracker | None = None  # 当前轮次的工作流追踪器
         self.mcp_service: MCPService | None = None   # MCP 服务层
         self.broker: Any = None                      # InProcessBroker 消息总线
+        # ToolGuardian 工具修复闭环（GUI 自动接线）
+        self.global_memory: Any = None               # GlobalMemory 全局记忆
+        self.guardian: Any = None                    # ToolGuardianAgent 实例
+        self._guardian_workflow_id: str = ""         # Guardian 订阅的工作流
+        self._guardian_listener_task: asyncio.Task | None = None
+        # 总线治理消息转发回调（master/guardian/子 Agent 共用）
+        self._bus_forwarder: Any = None
 
     # ------------------------------------------------------------------
     # 初始化
@@ -89,6 +97,8 @@ class EngineBridge:
                     db_path=getattr(self.config, 'vault_db_path', '') or '',
                     embedding_base_url=getattr(self.config, 'embedding_base_url', 'http://localhost:11434/v1'),
                     embedding_model=getattr(self.config, 'embedding_model', 'nomic-embed-text'),
+                    skill_enabled=getattr(self.config, 'skill_enabled', True),
+                    skill_db_path=getattr(self.config, 'skill_db_path', '') or '',
                 )
                 await self.mcp_service.setup(self.master)
                 logger.info("MCP 服务已启用: %s", self.mcp_service.get_tool_stats())
@@ -102,6 +112,12 @@ class EngineBridge:
                 from youmi.bus.broker import InProcessBroker
                 self.broker = InProcessBroker()
                 self.master.connect_bus(self.broker)
+                # ToolGuardian + GlobalMemory 工具修复闭环
+                # （须先于转发注册：转发回调需覆盖 guardian 的 agent_id）
+                if getattr(self.config, 'guardian_enabled', True):
+                    await self._setup_guardian()
+                # 总线事件转发前端（观察者模式，不消费队列）
+                self._setup_bus_forwarding()
                 logger.info("消息总线已启用 (InProcessBroker)")
             except Exception as exc:
                 logger.warning("消息总线初始化失败: %s", exc)
@@ -114,11 +130,193 @@ class EngineBridge:
         self._patch_run_sub_agent()
         self._card_for_agent(self.master.agent_id, self.master.name, "master")
         logger.info(
-            "EngineBridge 初始化完成: master=%s, 会话数=%d, mcp=%s, bus=%s",
+            "EngineBridge 初始化完成: master=%s, 会话数=%d, mcp=%s, bus=%s, guardian=%s",
             self.master.name, len(self.sessions),
             'yes' if self.mcp_service else 'no',
             'yes' if self.broker else 'no',
+            'yes' if self.guardian else 'no',
         )
+
+    # ------------------------------------------------------------------
+    # ToolGuardian 工具修复闭环（GUI 自动接线）
+    # ------------------------------------------------------------------
+
+    async def _setup_guardian(self) -> None:
+        """创建 GlobalMemory + ToolGuardianAgent 并接入消息总线。
+
+        接线语义：
+        - GlobalMemory 注入 ``master._global_memory``，激活
+          PostTaskPipeline 的失败经验沉淀链路（on_stop 触发）。
+        - ToolGuardianAgent 订阅总线（独立 workflow），后台监听
+          FEEDBACK(tool_issue) 汇报并自动修复 + 写回全局记忆。
+        - 子 Agent 创建时经 ``connect_guardian`` 获得汇报地址
+          （见 _patch_create_sub_agent）。
+        - 任一环节失败均优雅降级（guardian=None 不影响主流程）。
+        """
+        try:
+            from youmi.knowledge.global_memory import GlobalMemory
+            from youmi.coordinator.tool_guardian import ToolGuardianAgent
+
+            # 1. GlobalMemory（复用 MCPService 的 EmbeddingClient）
+            db_path = getattr(self.config, 'knowledge_db_path', '') or ".youmi_knowledge.db"
+            embedding = (
+                self.mcp_service.embedding_client
+                if self.mcp_service is not None else None
+            )
+            self.global_memory = GlobalMemory(
+                db_path=db_path, embedding_client=embedding,
+            )
+            await self.global_memory.initialize()
+            # 激活 PostTaskPipeline 经验沉淀链路（master.on_stop 读取）
+            self.master._global_memory = self.global_memory
+            logger.info("GlobalMemory 已启用: %s", db_path)
+
+            # 2. ToolGuardianAgent（无 LLM 配置时走规则修复）
+            mcp_server = (
+                self.mcp_service.server
+                if self.mcp_service is not None else None
+            )
+            self.guardian = ToolGuardianAgent.from_config_dir(
+                mcp_server=mcp_server,
+                global_memory=self.global_memory,
+            )
+            await self.guardian.initialize()
+
+            # 3. 订阅总线（独立 workflow；点对点 FEEDBACK 投递的前提）
+            self._guardian_workflow_id = await self.broker.create_workflow()
+            await self.broker.subscribe(
+                self.guardian.agent_id, self._guardian_workflow_id,
+            )
+
+            # 4. 后台监听循环（消费队列 → 解析汇报 → 自动修复）
+            self._guardian_listener_task = asyncio.create_task(
+                self._guardian_listener_loop(),
+                name="gui-tool-guardian-listener",
+            )
+            self._card_for_agent(
+                self.guardian.agent_id, self.guardian.name, "tool_guardian",
+                bio="工具记忆守护：收集工具问题汇报，自动修复工具描述",
+            )
+            logger.info(
+                "ToolGuardian 已接入总线: agent_id=%s, workflow=%s",
+                self.guardian.agent_id, self._guardian_workflow_id,
+            )
+        except Exception as exc:
+            logger.warning("ToolGuardian 集成失败，工具修复闭环降级: %s", exc)
+            self.guardian = None
+            self._guardian_listener_task = None
+
+    async def _guardian_listener_loop(self) -> None:
+        """Guardian 后台监听循环：消费 FEEDBACK 汇报并自动处理。
+
+        每收到一批汇报调用 process_reports()（规则/LLM 修复工具描述 +
+        写回全局记忆），处理结果以 agent_message 事件广播前端。
+        """
+        guardian = self.guardian
+        broker = self.broker
+        while guardian is not None and broker is not None:
+            try:
+                msg = await broker.wait_for_message(
+                    guardian.agent_id, timeout=2.0,
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.debug("guardian listener error", exc_info=True)
+                await asyncio.sleep(1.0)
+                continue
+
+            if msg is None:
+                continue
+            try:
+                await guardian.receive_message(msg.to_agent_message())
+                if getattr(guardian, "pending_count", 0) > 0:
+                    results = await guardian.process_reports()
+                    await self._broadcast_guardian_results(results)
+            except Exception:
+                logger.exception("guardian 处理汇报出错")
+
+    async def _broadcast_guardian_results(self, results: list[dict]) -> None:
+        """把 Guardian 修复结果广播为前端 agent_message 事件。"""
+        if not results or self.guardian is None:
+            return
+        lines: list[str] = []
+        for r in results:
+            tool = r.get("tool_name", "?")
+            if r.get("description_updated"):
+                lines.append(f"工具 `{tool}` 描述已修复")
+            elif r.get("error"):
+                lines.append(f"工具 `{tool}` 处理失败: {r['error']}")
+            else:
+                lines.append(f"工具 `{tool}` 无需修改")
+        content = "ToolGuardian 修复报告：\n" + "\n".join(
+            f"- {ln}" for ln in lines
+        )
+        self._emit(agent_message(
+            session_id=self.active_session_id or "",
+            from_agent_id=self.guardian.agent_id,
+            from_agent_name=self.guardian.name,
+            to_agent_id=self.master.agent_id,
+            msg_type="feedback",
+            content=content,
+            metadata={"report_type": "guardian_fix"},
+        ))
+
+    # ------------------------------------------------------------------
+    # 总线事件转发前端
+    # ------------------------------------------------------------------
+
+    def _make_bus_forwarder(self):
+        """构造总线消息观察者回调 — 治理类消息转发为 agent_message 事件。
+
+        只转发 TOOL_REQUEST / TOOL_RESPONSE / FEEDBACK 三类（这些消息
+        由各组件直接 publish，不经 MESSAGE_SENDING 钩子渲染）；聊天类
+        消息仍由 GUIHookBridge 的 MESSAGE_SENDING 钩子渲染，避免重复。
+        观察者回调在 publish 时同步触发，不消费目标队列。
+        """
+        from youmi.bus.message import WorkflowMessageType
+
+        forwarded = {
+            WorkflowMessageType.TOOL_REQUEST,
+            WorkflowMessageType.TOOL_RESPONSE,
+            WorkflowMessageType.FEEDBACK,
+        }
+        bridge = self
+
+        async def _forward(message: Any) -> None:
+            try:
+                if message.msg_type not in forwarded:
+                    return
+                from_id = message.from_agent_id
+                card = bridge.cards.get(from_id)
+                if card is not None:
+                    from_name = card.name
+                elif bridge.guardian is not None and from_id == bridge.guardian.agent_id:
+                    from_name = bridge.guardian.name
+                else:
+                    from_name = from_id
+                bridge._emit(agent_message(
+                    session_id=bridge.active_session_id or "",
+                    from_agent_id=from_id,
+                    from_agent_name=from_name,
+                    to_agent_id=message.to_agent_id or "",
+                    msg_type=message.msg_type.value,
+                    content=message.content,
+                    metadata=dict(message.metadata or {}),
+                ))
+            except Exception:
+                logger.debug("bus forwarding error", exc_info=True)
+
+        return _forward
+
+    def _setup_bus_forwarding(self) -> None:
+        """为 master / guardian 注册总线消息转发（子 Agent 在创建时注册）"""
+        self._bus_forwarder = self._make_bus_forwarder()
+        targets = [self.master.agent_id]
+        if self.guardian is not None:
+            targets.append(self.guardian.agent_id)
+        for agent_id in targets:
+            self.broker.on_message(agent_id, self._bus_forwarder)
 
     # ------------------------------------------------------------------
     # Agent 卡片
@@ -171,6 +369,18 @@ class EngineBridge:
             if bridge.broker is not None:
                 try:
                     agent.connect_bus(bridge.broker)
+                    # 工具问题汇报地址（report_tool_issue → ToolGuardian）
+                    if bridge.guardian is not None:
+                        agent.connect_guardian(
+                            bridge.guardian.agent_id,
+                            bridge.broker,
+                            bridge._guardian_workflow_id,
+                        )
+                    # 治理消息转发（TOOL_RESPONSE 等发给该 Agent 的消息）
+                    if bridge._bus_forwarder is not None:
+                        bridge.broker.on_message(
+                            agent.agent_id, bridge._bus_forwarder,
+                        )
                 except Exception as exc:
                     logger.warning("子 Agent '%s' 总线接入失败: %s", agent.name, exc)
 
@@ -405,6 +615,26 @@ class EngineBridge:
             return self.mcp_service.get_tool_stats()
         return {"providers": 0, "tools": 0, "calls": 0, "errors": 0}
 
+    async def ingest_skill(self, skill_doc: str) -> dict:
+        """入库一份 SOP Skill 文档（供 POST /api/skills 调用）。"""
+        if self.mcp_service is None:
+            return {"ok": False, "error": "MCP 服务未启用"}
+        return await self.mcp_service.ingest_skill(skill_doc)
+
+    async def search_skills(
+        self, query: str, top_k: int = 5,
+    ) -> list[dict]:
+        """锥形检索 Skill 库（供 GET /api/skills 调用）。"""
+        if self.mcp_service is None:
+            return []
+        return await self.mcp_service.search_skills(query, top_k=top_k)
+
+    async def get_skill_stats(self) -> dict:
+        """Skill 库统计信息。"""
+        if self.mcp_service is None:
+            return {"enabled": False, "skills": 0}
+        return await self.mcp_service.get_skill_stats()
+
     def list_sessions(self, tenant: str | None = None) -> list[dict]:
         """列出会话；tenant 非 None 时仅返回该租户的会话。"""
         return [
@@ -585,7 +815,32 @@ class EngineBridge:
     # 清理
     # ------------------------------------------------------------------
     async def shutdown(self) -> None:
-        """关闭引擎，释放 MCP 和总线资源。"""
+        """关闭引擎，释放 MCP、Guardian 和总线资源。"""
+        # 停止 Guardian 监听循环
+        if self._guardian_listener_task is not None:
+            self._guardian_listener_task.cancel()
+            try:
+                await self._guardian_listener_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._guardian_listener_task = None
+
+        # 销毁 ToolGuardian（Agent 生命周期清理）
+        if self.guardian is not None:
+            try:
+                await self.guardian.destroy()
+            except Exception:
+                logger.debug("guardian destroy failed", exc_info=True)
+            self.guardian = None
+
+        # 关闭全局记忆
+        if self.global_memory is not None:
+            try:
+                await self.global_memory.close()
+            except Exception:
+                pass
+            self.global_memory = None
+
         if self.mcp_service:
             await self.mcp_service.shutdown()
         if self.broker:

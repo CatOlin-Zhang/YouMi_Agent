@@ -223,6 +223,62 @@ async def _handle_list_tools(request: web.Request) -> web.Response:
     return web.json_response({"tools": tools, "stats": stats})
 
 
+async def _handle_skills(request: web.Request) -> web.Response:
+    """GET /api/skills — 锥形检索 SOP Skill 库。
+
+    Query 参数:
+        q: 自然语言查询（缺省返回库统计）
+        top_k: 返回数量（默认 5，上限 20）
+    """
+    bridge: EngineBridge = request.app["bridge"]
+    if not hasattr(bridge, "search_skills"):
+        return web.json_response({"skills": [], "stats": {"enabled": False}})
+    query = request.query.get("q", "").strip()
+    try:
+        top_k = max(1, min(int(request.query.get("top_k", "5")), 20))
+    except ValueError:
+        top_k = 5
+    if not query:
+        return web.json_response({
+            "skills": [],
+            "stats": await bridge.get_skill_stats(),
+        })
+    skills = await bridge.search_skills(query, top_k=top_k)
+    return web.json_response({
+        "skills": skills,
+        "stats": await bridge.get_skill_stats(),
+    })
+
+
+async def _handle_ingest_skill(request: web.Request) -> web.Response:
+    """POST /api/skills — 入库一份 SOP Skill 文档。
+
+    Body JSON::
+
+        {"doc": "# Skill 名称\\n..."}     # Markdown 文本（frontmatter 可选）
+        # 或显式字段
+        {"skill_name": "...", "describe": "...", "bound_tool_name": "...",
+         "tags": [...], "risk_level": "low", "content": "..."}
+    """
+    bridge: EngineBridge = request.app["bridge"]
+    if not hasattr(bridge, "ingest_skill"):
+        return web.json_response(
+            {"ok": False, "error": "Skill 库未启用"}, status=503,
+        )
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="Invalid JSON body")
+
+    doc = body.get("doc") or body
+    if isinstance(doc, str) and not doc.strip():
+        raise web.HTTPBadRequest(text="Missing skill document ('doc')")
+
+    result = await bridge.ingest_skill(doc)
+    status = 201 if result.get("ok") else 400
+    return web.json_response(result, status=status)
+
+
 async def _handle_healthz(request: web.Request) -> web.Response:
     """GET /healthz — 健康探活（免认证，供负载均衡 / 监控使用）。"""
     bridge = request.app.get("bridge")
@@ -418,6 +474,8 @@ def _setup_routes(app: web.Application) -> None:
     app.router.add_post("/api/sessions", _handle_create_session)
     app.router.add_delete("/api/sessions/{session_id}", _handle_delete_session)
     app.router.add_get("/api/tools", _handle_list_tools)
+    app.router.add_get("/api/skills", _handle_skills)
+    app.router.add_post("/api/skills", _handle_ingest_skill)
     app.router.add_get("/api/audit", _handle_audit)
     app.router.add_get("/ws", _handle_ws)
 

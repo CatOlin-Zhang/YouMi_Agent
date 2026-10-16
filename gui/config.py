@@ -7,6 +7,10 @@
 - YOUMI_GUI_MCP    (默认 1，启用 MCP 工具调用层)
 - YOUMI_GUI_BUS    (默认 1，启用进程内消息总线)
 - YOUMI_GUI_VAULT  (默认 1，启用 ToolVault + ToolStore sqlite-vec 方案)
+- YOUMI_GUI_SKILL  (默认 1，启用 SkillStore + SkillIngestor SOP 知识库)
+- YOUMI_GUI_SKILL_DB (默认空 → ".youmi_skills.db")
+- YOUMI_GUI_GUARDIAN (默认 1，启用 ToolGuardian + GlobalMemory 工具修复闭环)
+- YOUMI_GUI_KNOWLEDGE_DB (默认空 → ".youmi_knowledge.db")
 
 认证由 ``YOUMI_AUTH_TOKEN`` / ``YOUMI_AUTH_TOKENS`` 控制（见 youmi/security/auth.py）：
 未配置时零摩擦放行；配置后所有 ``/api/*`` 与 ``/ws`` 需要 token（``?token=`` 或
@@ -33,6 +37,10 @@ class GUIConfig:
         vault_db_path: str = "",
         embedding_base_url: str = "http://localhost:11434/v1",
         embedding_model: str = "nomic-embed-text",
+        skill_enabled: bool = True,
+        skill_db_path: str = "",
+        guardian_enabled: bool = True,
+        knowledge_db_path: str = "",
     ) -> None:
         self.host = host
         self.port = port
@@ -43,6 +51,10 @@ class GUIConfig:
         self.vault_db_path = vault_db_path
         self.embedding_base_url = embedding_base_url
         self.embedding_model = embedding_model
+        self.skill_enabled = skill_enabled
+        self.skill_db_path = skill_db_path
+        self.guardian_enabled = guardian_enabled
+        self.knowledge_db_path = knowledge_db_path
 
         here = Path(__file__).resolve().parent
         self.package_dir = str(here)
@@ -70,10 +82,17 @@ def load_config() -> GUIConfig:
     embedding_model = os.environ.get(
         "YOUMI_GUI_EMBEDDING_MODEL", "nomic-embed-text"
     )
+    skill_enabled = os.environ.get("YOUMI_GUI_SKILL", "1") == "1"
+    skill_db_path = os.environ.get("YOUMI_GUI_SKILL_DB", "")
+    guardian_enabled = os.environ.get("YOUMI_GUI_GUARDIAN", "1") == "1"
+    knowledge_db_path = os.environ.get("YOUMI_GUI_KNOWLEDGE_DB", "")
     return GUIConfig(
         host=host, port=port, master_agent_name=master,
         mcp_enabled=mcp_enabled, bus_enabled=bus_enabled,
         vault_enabled=vault_enabled, vault_db_path=vault_db_path,
         embedding_base_url=embedding_base_url,
         embedding_model=embedding_model,
+        skill_enabled=skill_enabled, skill_db_path=skill_db_path,
+        guardian_enabled=guardian_enabled,
+        knowledge_db_path=knowledge_db_path,
     )

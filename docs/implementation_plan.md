@@ -1,6 +1,6 @@
 # YouMi Agent 实施计划
 
-> 最后更新：2026-09-29
+> 最后更新：2026-10-16
 >
 > 本文档已合并 `supplement_roadmap.md`（生产就绪缺口分析），形成统一的开发路线图。
 
@@ -18,11 +18,13 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 **P1 功能闭环与生产可用已交付**：召回确认闭环（`youmi/mcp/confirm.py` 可插拔确认策略 + `ToolBridge.search_and_confirm` 完整闭环：搜索 → 确认 → 合适则加载 / 不合适排除并扩大搜索 / 多轮无果回复「没有该功能的工具」）；AgentToolContext 轮次自动推进（`_advance_tool_context()` 在 run / chat_turn / chat_turn_stream 三路自动调用）；FastAPI 任务网关（`youmi/gateway/`：任务队列 + asyncio Worker 池 + SSE 事件流 + 认证/审计 + 租户隔离，`python -m youmi.gateway` 启动）；Mock LLM Server（OpenAI 兼容：脚本化 / 流式 / 错误注入）+ Eval 基准（`youmi/eval/`：数据集 + 完成率/工具准确率/成本评分 + CLI）。
 
-**Phase 5 Skill 库与召回治理组件已落地（待接线）**：SkillStore（SOP Skill 并行库，sqlite-vec L1/L2 双层索引，结构镜像 ToolStore）+ SkillIngestor（Markdown 宽容解析入库）+ SummaryGenerator（三级摘要）；召回治理组件 ConeRetriever（锥形检索：语义∩tag∩风险∩权限）、AuditGate（召回审计闸门 BLOCK/MANUAL/PASS）、CallPathRouter（SKILL/CROSS_DOMAIN/DIRECT 调用来源版本分流）均已实现并通过单测，接入 ToolBridge 运行时主链路待后续阶段。
+**Phase 5 Skill 库与召回治理已落地并完成 GUI 运行时接线**：SkillStore（SOP Skill 并行库，sqlite-vec L1/L2 双层索引，结构镜像 ToolStore）+ SkillIngestor（Markdown 宽容解析入库）+ SummaryGenerator（三级摘要）；召回治理组件 ConeRetriever（锥形检索，ToolBridge 内置懒构造）、AuditGate（召回审计闸门 BLOCK/MANUAL/PASS）、CallPathRouter（SKILL/CROSS_DOMAIN/DIRECT 调用来源版本分流）已接入 GUI 运行时主链路：MCPService 统一创建并注入 Master/子 Agent 的 ToolBridge，`/api/skills` 提供入库与检索入口。
 
-但对照完整生命周期流程图，**编排层高级能力（层级架构）、Skill 运行时接线**等高级能力尚未落地。
+**GUI 功能闭环三件套已交付**：① Skill 运行时接线（如上）；② ToolGuardian GUI 集成（EngineBridge 自动创建 GlobalMemory + ToolGuardianAgent 接入总线，自动接收子 Agent 工具问题汇报并修复写回）；③ 总线事件转发前端（TOOL_REQUEST/TOOL_RESPONSE/FEEDBACK 转发为 `agent_message` 事件，前端渲染 Agent 间通信与 Guardian 修复广播）。
 
-**总体完成度：约 94%**（组件层基本齐全，剩余为接线与运维类缺口）
+但对照完整生命周期流程图，**编排层高级能力（层级架构）**等高级能力尚未落地。
+
+**总体完成度：约 96%**（组件层与 GUI 接线基本齐全，剩余为编排扩展与运维类缺口）
 
 **生产就绪度：中高** — 可靠性（重试/熔断）、安全（认证/沙箱）、可观测性（OTel/审计/健康检查）已就位；部署形态随 P1 补齐（HTTP 网关 + asyncio 多 Worker + 多租户隔离）；剩余缺口为持久化任务队列（崩溃恢复）、凭证集中管理与容器化（K8s）。
 
@@ -175,7 +177,7 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 
 ## Phase 5：外部 Skill 导入
 
-### 已实现（组件层，待运行时接线）
+### 已实现（组件层 + GUI 运行时接线）
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
@@ -186,13 +188,14 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 | 锥形检索融合层 | `youmi/mcp/cone.py` | ConeRetriever：语义方向 ∩ tag ∩ 风险 ∩ 权限四边界联合裁剪；优先 ToolStore.search_cone（SQL 锥形），无 Store 回退 Vault 内存锥形；ConeStats 裁剪统计 |
 | 调用版本路由 | `youmi/mcp/version_router.py` | CallPathRouter：SKILL 来源 → root 版本（有 Skill 绑定）；CROSS_DOMAIN / DIRECT → head 最新版本 |
 | 共享向量工具 | `youmi/_vec_utils.py` | sqlite-vec 加载 / 向量归一化 / L2↔余弦互转 / 纯 Python 余弦降级，ToolStore / GlobalMemory / PlanMemory / SkillStore 复用 |
-| 单测覆盖 | `tests/test_skill_store.py`, `test_skill_ingest.py`, `test_audit_gate.py`, `test_cone_retrieval.py`, `test_version_router.py`, `test_version_tree.py` | 组件层全部有独立单测 |
+| **Skill 运行时 GUI 接线** | `gui/engine/mcp_service.py`, `gui/engine/bridge.py`, `gui/server.py` | MCPService 创建 SkillStore/SkillIngestor（失败优雅降级）并构造 AuditGate/CallPathRouter 注入 Master 与子 Agent 的 ToolBridge；`GET/POST /api/skills` 提供检索与入库入口（EngineBridge 委托 + mock 引擎接口同步）|
+| 单测覆盖 | `tests/test_skill_store.py`, `test_skill_ingest.py`, `test_audit_gate.py`, `test_cone_retrieval.py`, `test_version_router.py`, `test_version_tree.py`, `test_gui_closure_wiring.py` | 组件层与 GUI 接线全部有独立单测 |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
-| Skill 运行时接线 | SkillIngestor 入库入口（CLI / GUI）与 CallPathRouter/AuditGate/ConeRetriever 接入 ToolBridge 主链路待后续阶段 |
+| Skill 入库 CLI | 命令行批量导入 Skill 文档（当前经 GUI REST `POST /api/skills` 入库）|
 | `youmi/skills/` 完整模块 | 代码型 Skill（manifest.yaml + tools/ + workflow.py）目录规范 |
 | Markdown 轻量 Skill 注入 | `.md` 指令注入 system prompt（需 Skill 检索命中后注入 Agent 上下文）|
 
@@ -219,13 +222,13 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 | **ToolGuardian 全局记忆闭环** | `youmi/coordinator/tool_guardian.py` | 接入 `global_memory` 参数：修复前 `get_tool_knowledge()` 查询历史经验注入修复上下文；修复成功后 `_persist_fix_to_memory()` 写入 BUG_FIX 经验（自动标记 resolved）并将历史未解决问题 `mark_resolved()`；全局记忆不可用/失败时优雅降级 |
 | **修复策略注入历史经验** | `youmi/coordinator/fix_strategies.py` | `_generate_fix()` 接受 `tool_knowledge` 参数：LLM prompt 注入「历史经验」段（known_issues/fix_history/resolved_issues + 根治提示）；规则路径附加已知问题（与本次报错去重） |
 | **search_tool_experience 内置工具** | `youmi/coordinator/tool_guardian.py` | ToolGuardian 可主动检索全局记忆中的工具经验（语义检索，未接入/异常时返回明确状态） |
+| **ToolGuardian GUI 集成** | `gui/engine/bridge.py`, `gui/config.py` | EngineBridge 自动创建 GlobalMemory（注入 master，激活 PostTaskPipeline 经验沉淀）+ ToolGuardianAgent（总线订阅 + 后台监听循环自动处理工具问题汇报 + 修复结果前端广播）；`guardian_enabled`/`knowledge_db_path` 可配置，异常优雅降级 |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
 | 人工反馈回写全局经验 | 用户反馈采集后写入 GlobalMemory（与非功能需求「反馈闭环」联动） |
-| ToolGuardian GUI 集成 | GUI 中自动创建 ToolGuardianAgent 并传入全局记忆实例（当前需在代码中手动构造） |
 
 ---
 
@@ -265,14 +268,17 @@ Phase 6 全局记忆已落地并完成闭环：任务结束后 PostTaskPipeline 
 | MCP 工具面板（前端） | `gui/static/` | HTML + CSS + JS 渲染工具名称、描述、参数信息 |
 | Mock 模式 MCP 接口 | `gui/mock_engine.py` | `list_tools()` / `get_tool_stats()` / `shutdown()` 保持接口一致 |
 | 消息总线 GUI 集成 | `gui/engine/bridge.py` | InProcessBroker 创建 + Master/子 Agent 自动接入 |
+| **Skill 库与召回治理接线** | `gui/engine/mcp_service.py`, `gui/engine/bridge.py` | SkillStore/SkillIngestor 创建 + AuditGate/CallPathRouter 构造并注入 Master/子 Agent 的 ToolBridge；EngineBridge 提供 ingest/search/stats 委托 |
+| **/api/skills REST 端点** | `gui/server.py` | `GET /api/skills?q=&top_k=` 语义检索 + `POST /api/skills` 入库（Skill 未启用 503 / mock 模式降级语义明确）；mock_engine 接口同步 |
+| **ToolGuardian GUI 集成** | `gui/engine/bridge.py` | 自动创建 GlobalMemory + ToolGuardianAgent 接入总线（订阅 + 后台监听 + worker 汇报自动修复 + BUG_FIX 写回 + `guardian_fix` 前端广播）；子 Agent 创建时自动 `connect_guardian` |
+| **总线事件转发前端** | `gui/engine/bridge.py`, `gui/hub/events.py`, `gui/static/js/ui.js` | TOOL_REQUEST/TOOL_RESPONSE/FEEDBACK 经 Broker 观察者回调转发为 `agent_message` 事件（Master/Guardian/动态子 Agent 全覆盖，聊天类不转发避免与 MESSAGE_SENDING 钩子重复渲染），前端系统行渲染 |
 
 ### 未实现
 
 | 缺失项 | 说明 |
 |--------|------|
-| 总线事件转发到前端 | 监听 Broker 消息回调，将 Agent 间通信转发为 GUI `agent_message` 事件 |
-| ToolGuardian GUI 集成 | 创建 ToolGuardianAgent 实例接入总线（传入 MCPService 的全局记忆实例），自动接收子 Agent 工具调用失败汇报 |
 | 工具搜索 UI | 前端工具面板增加「搜索工具」功能（自然语言 → 向量匹配 → 候选工具） |
+| Skill 面板 UI | 前端 Skill 库浏览/检索/入库界面（当前经 REST `/api/skills` 可用，无专门 UI） |
 | Mock 模式 Vault 数据 | mock_engine.py 返回更丰富的 mock 工具数据（参数 + 描述） |
 
 ---
@@ -395,7 +401,7 @@ P2 — 降本增效与工程化
   ├── 成本治理：模型路由 + 语义缓存                          ❌ 未实现
   ├── 工程化：CI/CD + 文档补全（docs/ 已补全）                ✅ 文档 / ❌ CI
   ├── 工程化：版本注册表 + 实验追踪                          ❌ 未实现
-  ├── Phase 5  Skill 导入                                    🟡 组件已实现（SkillStore/SkillIngestor/Summary），运行时接线未完成
+  ├── Phase 5  Skill 导入                                    ✅ 已完成（组件 + GUI 运行时接线 + /api/skills 端点；CLI 入库与 Skill 注入 prompt 待做）
   └── 外部通信渠道（Telegram/Discord）                       ❌ 未实现
 
 P3 — 长期扩展与生态
@@ -439,7 +445,10 @@ P3 — 长期扩展与生态
 ✅ P1  Eval 基准（数据集 + 完成率 / 工具准确率 / 成本评分 + CLI）
 ✅ Phase 5  SkillStore SOP 并行库（sqlite-vec L1/L2 双层索引 + 锥形检索）
 ✅ Phase 5  SkillIngestor + SummaryGenerator（Skill 文档宽容解析 + 三级摘要）
-✅ Phase 5  召回治理组件（ConeRetriever 锥形检索 / AuditGate 审计闸门 / CallPathRouter 版本路由）— 组件已实现，待接线
+✅ Phase 5  召回治理组件（ConeRetriever 锥形检索 / AuditGate 审计闸门 / CallPathRouter 版本路由）
+✅ Phase 5  Skill 运行时 GUI 接线（MCPService 创建 SkillStore/SkillIngestor + AuditGate/CallPathRouter 注入 ToolBridge + /api/skills 端点）
+✅ GUI-Core ToolGuardian 集成（GlobalMemory 自动创建注入 + guardian 总线闭环 + 修复结果前端广播）
+✅ GUI-Core 总线事件转发前端（agent_message 事件：TOOL_REQUEST/TOOL_RESPONSE/FEEDBACK 全覆盖）
 ✅ GUI-Core MCP 集成（MCPService + sqlite-vec 默认启用）
 ✅ GUI-Core Bus 集成（InProcessBroker + 子 Agent 自动接入）
 ✅ GUI 工具面板（前端 + /api/tools + tool_list 事件）
