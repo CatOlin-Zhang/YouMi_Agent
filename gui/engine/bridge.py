@@ -176,9 +176,16 @@ class EngineBridge:
                 self.mcp_service.server
                 if self.mcp_service is not None else None
             )
+            # 版本规则闭环: 注入 ToolStore（历史提交 + 修订版本）与审批管理器（超次转人工）
+            tool_store = (
+                getattr(self.mcp_service, "tool_store", None)
+                if self.mcp_service is not None else None
+            )
             self.guardian = ToolGuardianAgent.from_config_dir(
                 mcp_server=mcp_server,
                 global_memory=self.global_memory,
+                tool_store=tool_store,
+                approval_manager=getattr(self.master, "_approval_manager", None),
             )
             await self.guardian.initialize()
 
@@ -227,6 +234,13 @@ class EngineBridge:
                 continue
 
             if msg is None:
+                # 无新汇报时驱动重试队列 (自动修复重试 → 达上限转人工)
+                if getattr(guardian, "pending_count", 0) > 0:
+                    try:
+                        results = await guardian.process_reports()
+                        await self._broadcast_guardian_results(results)
+                    except Exception:
+                        logger.exception("guardian 重试处理出错")
                 continue
             try:
                 await guardian.receive_message(msg.to_agent_message())
@@ -243,8 +257,20 @@ class EngineBridge:
         lines: list[str] = []
         for r in results:
             tool = r.get("tool_name", "?")
-            if r.get("description_updated"):
-                lines.append(f"工具 `{tool}` 描述已修复")
+            if r.get("escalated"):
+                record_id = r.get("approval_record_id", "")
+                lines.append(
+                    f"工具 `{tool}` 自动修复 {r.get('fix_attempts', 0)} 次未果，"
+                    f"已转人工审批 {('(' + record_id + ')') if record_id else ''}"
+                )
+            elif r.get("retry_scheduled"):
+                lines.append(
+                    f"工具 `{tool}` 本轮未产生有效修复，"
+                    f"已排入第 {r.get('fix_attempts', 0)} 次自动重试"
+                )
+            elif r.get("description_updated"):
+                version_info = f" (版本 {r['fix_version']})" if r.get("fix_version") else ""
+                lines.append(f"工具 `{tool}` 描述已修复{version_info}")
             elif r.get("error"):
                 lines.append(f"工具 `{tool}` 处理失败: {r['error']}")
             else:

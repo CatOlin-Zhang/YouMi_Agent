@@ -106,6 +106,11 @@ class MCPService:
         return self._vault
 
     @property
+    def tool_store(self) -> Any:
+        """ToolStore 持久化实例（可能为 None；供 Guardian 等复用）"""
+        return self._store
+
+    @property
     def initialized(self) -> bool:
         return self._initialized
 
@@ -334,7 +339,10 @@ class MCPService:
         if store is not None:
             try:
                 from youmi.mcp.skill_ingest import SkillIngestor
-                self._skill_ingestor = SkillIngestor(skill_store=store)
+                # 注入 ToolStore: 技能携带的工具同步落库并转正式版
+                self._skill_ingestor = SkillIngestor(
+                    skill_store=store, tool_store=self._store,
+                )
                 logger.info("SkillIngestor 已就绪 (store=%s)", db_path)
             except Exception as exc:
                 logger.warning("SkillIngestor 创建失败: %s", exc)
@@ -371,7 +379,8 @@ class MCPService:
                 summary=defn.description[:80],
                 tier=ToolContextTier.HOT,
             )
-            self._vault._entries[name] = entry
+            # 走 add_tool: 按来源解析初始版本 + 写入 ToolStore 持久化
+            await self._vault.add_tool(entry)
             imported += 1
 
         if imported > 0:
@@ -450,10 +459,17 @@ class MCPService:
             return []
 
         tools = await self._server.list_tools()
-        return [
-            {
+        entries = self._vault._entries if self._vault is not None else {}
+        result: list[dict[str, Any]] = []
+        for t in tools:
+            entry = entries.get(t.name)
+            result.append({
                 "name": t.name,
                 "description": t.description,
+                # 版本规则字段: 候选库 0.x.y / 正式库 >=1.0.0
+                "version": getattr(entry, "version", ""),
+                "origin": getattr(entry, "origin", ""),
+                "stage": getattr(entry, "stage", ""),
                 "parameters": [
                     {
                         "name": p.name,
@@ -463,9 +479,8 @@ class MCPService:
                     }
                     for p in (t.parameters or [])
                 ],
-            }
-            for t in tools
-        ]
+            })
+        return result
 
     def get_tool_stats(self) -> dict[str, Any]:
         """获取 MCPServer 统计信息。"""

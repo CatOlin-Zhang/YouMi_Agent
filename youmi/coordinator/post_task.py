@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from typing import Any, TYPE_CHECKING
@@ -31,6 +32,11 @@ from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from youmi.core.tool import ToolDefinition
+from youmi.core.versioning import (
+    PROMOTION_MIN_SUCCESSES,
+    ChangeKind,
+    is_promotion_eligible,
+)
 
 if TYPE_CHECKING:
     from youmi.coordinator.master import MasterAgent
@@ -108,13 +114,18 @@ class PostTaskPipeline:
         self,
         tool_store: ToolStore | None = None,
         global_memory: GlobalMemory | None = None,
+        tool_verifier: Any | None = None,
     ) -> None:
         self._experiences: list[ToolExperience] = []
         self._summary: TaskOutcomeSummary | None = None
         self._tool_store = tool_store  # ToolStore 实例 (可选, 用于版本更新)
         self._global_memory = global_memory  # GlobalMemory 实例 (可选, P6)
+        # 自动测试门禁: async/sync (tool_name) -> bool; None = 内置结构校验
+        self._tool_verifier = tool_verifier
         # P6: 累计失败次数 (跨任务的内存统计，按工具名累计)
         self._failure_counts: dict[str, int] = {}
+        # 版本规则: 连续成功调用计数 (有失败即清零, 达阈值晋升 1.0.0)
+        self._success_counts: dict[str, int] = {}
 
     @property
     def experiences(self) -> list[ToolExperience]:
@@ -164,6 +175,14 @@ class PostTaskPipeline:
                 logger.warning(
                     "PostTaskPipeline: update_global_memory failed: %s", exc,
                 )
+
+        # 阶段 5: 版本规则 — 候选工具连续成功达阈值 → 晋升正式版 1.0.0
+        try:
+            await self.update_tool_versions(self._experiences)
+        except Exception as exc:
+            logger.warning(
+                "PostTaskPipeline: update_tool_versions failed: %s", exc,
+            )
 
         logger.info(
             "PostTaskPipeline finished: %d experiences, %d/%d completed",
@@ -480,6 +499,7 @@ class PostTaskPipeline:
                 new_tool_id = await self.trigger_tool_version_update(
                     tool_name=exp.tool_name,
                     fix_description=fix_description,
+                    change_kind=ChangeKind.FIX.value,
                 )
                 if new_tool_id:
                     # 触发成功后记录修复经验并重置计数
@@ -503,6 +523,122 @@ class PostTaskPipeline:
         )
 
     # -----------------------------------------------------------------------
+    # 阶段 5: 版本规则推进 (候选 → 正式)
+    # -----------------------------------------------------------------------
+
+    async def update_tool_versions(
+        self,
+        experiences: list[ToolExperience],
+    ) -> dict[str, str]:
+        """按版本规则推进工具版本
+
+        - 候选库 (0.x.y): 自动测试通过且任务中连续成功调用达
+          ``PROMOTION_MIN_SUCCESSES`` 且零错误 → 晋升 1.0.0 正式版
+        - 窗口内出现失败 → 连续成功计数清零 (晋升要求“连续成功且无错误”)
+
+        Returns:
+            {tool_name: 新正式版 tool_id} 晋升结果
+        """
+        promoted: dict[str, str] = {}
+        if self._tool_store is None:
+            return promoted
+
+        promote = getattr(self._tool_store, "promote_to_stable", None)
+        if promote is None:
+            return promoted
+
+        for exp in experiences:
+            if exp.usage_count <= 0:
+                continue
+
+            failures = int(round(exp.usage_count * (1 - exp.success_rate)))
+            if failures > 0:
+                self._success_counts[exp.tool_name] = 0
+                continue
+
+            total = self._success_counts.get(exp.tool_name, 0) + exp.usage_count
+            self._success_counts[exp.tool_name] = total
+            if not is_promotion_eligible(total, failures):
+                continue
+
+            # 自动测试门禁: 未通过验证的候选不得进入正式库
+            if not await self._verify_candidate(exp.tool_name):
+                logger.info(
+                    "PostTaskPipeline: '%s' passed usage threshold but "
+                    "failed auto verification, promotion deferred",
+                    exp.tool_name,
+                )
+                continue
+
+            try:
+                tool_id = await promote(
+                    exp.tool_name,
+                    evidence=(
+                        f"自动测试通过 + 连续成功调用 {total} 次且无错误 "
+                        f"(阈值 {PROMOTION_MIN_SUCCESSES})"
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "PostTaskPipeline: promote '%s' failed: %s",
+                    exp.tool_name, exc,
+                )
+                continue
+
+            if tool_id:
+                self._success_counts[exp.tool_name] = 0
+                promoted[exp.tool_name] = tool_id
+                logger.info(
+                    "PostTaskPipeline: promoted '%s' to stable 1.0.0: %s",
+                    exp.tool_name, tool_id,
+                )
+
+        return promoted
+
+    async def _verify_candidate(self, tool_name: str) -> bool:
+        """自动测试门禁 — 晋升前的验证
+
+        优先使用注入的 ``tool_verifier``（真实自动化测试）；未注入时
+        执行内置结构校验：head 存在、定义可解析、名称一致、描述非空。
+        任何验证异常均视为未通过，不阻断其它工具晋升。
+        """
+        if self._tool_verifier is not None:
+            try:
+                result = self._tool_verifier(tool_name)
+                if inspect.isawaitable(result):
+                    result = await result
+                return bool(result)
+            except Exception as exc:
+                logger.warning(
+                    "PostTaskPipeline: auto verification for '%s' failed: %s",
+                    tool_name, exc,
+                )
+                return False
+
+        if self._tool_store is None:
+            return False
+        getter = getattr(self._tool_store, "get_head_version", None)
+        if getter is None:
+            # 存储实现不支持校验 → 不阻断 (兼容旧实现)
+            return True
+        try:
+            head = await getter(tool_name)
+        except Exception as exc:
+            logger.warning(
+                "PostTaskPipeline: load head for '%s' failed: %s",
+                tool_name, exc,
+            )
+            return False
+        if head is None:
+            return False
+        definition = getattr(head, "definition", None)
+        return bool(
+            definition is not None
+            and definition.name == tool_name
+            and (definition.description or "").strip()
+        )
+
+    # -----------------------------------------------------------------------
     # 工具版本更新触发
     # -----------------------------------------------------------------------
 
@@ -512,17 +648,20 @@ class PostTaskPipeline:
         fix_description: str,
         new_definition: ToolDefinition | None = None,
         bump: str = "patch",
+        change_kind: str | None = ChangeKind.FIX.value,
     ) -> str | None:
         """触发工具版本更新
 
         基于全局记忆收集的修复方案，创建新版本。
-        通常由 ToolGuardianAgent 修复后调用。
+        版本规则：仅修复 bug、不涉及功能变化 → 只提交修订号 (patch);
+        需要新增兼容功能或破坏性变更时由调用方显式传 change_kind。
 
         Args:
             tool_name: 工具名称
             fix_description: 修复说明
             new_definition: 新的工具定义 (None = 从 ToolStore 读取当前定义)
             bump: 版本号自增类型 "patch" | "minor" | "major"
+            change_kind: 变更类型 "fix" | "feature" | "breaking" (优先于 bump)
 
         Returns:
             新版本 tool_id，如果 ToolStore 未启用或工具不存在返回 None
@@ -535,9 +674,13 @@ class PostTaskPipeline:
             return None
 
         try:
-            # 如果未提供新定义，从 ToolStore 读取当前定义
+            # 如果未提供新定义，从 ToolStore 读取当前定义 (优先 main head)
             if new_definition is None:
-                entry = await self._tool_store.get_latest_version(tool_name)
+                getter = (
+                    getattr(self._tool_store, "get_head_version", None)
+                    or self._tool_store.get_latest_version
+                )
+                entry = await getter(tool_name)
                 if entry is None:
                     logger.warning(
                         "PostTaskPipeline: tool '%s' not found in store", tool_name
@@ -545,13 +688,22 @@ class PostTaskPipeline:
                     return None
                 new_definition = entry.definition
 
-            # 创建新版本
-            new_tool_id = await self._tool_store.create_version(
-                tool_name=tool_name,
-                new_definition=new_definition,
-                changelog=fix_description,
-                bump=bump,
-            )
+            # 创建新版本 (兼容不支持 change_kind 的存储实现)
+            try:
+                new_tool_id = await self._tool_store.create_version(
+                    tool_name=tool_name,
+                    new_definition=new_definition,
+                    changelog=fix_description,
+                    bump=bump,
+                    change_kind=change_kind,
+                )
+            except TypeError:
+                new_tool_id = await self._tool_store.create_version(
+                    tool_name=tool_name,
+                    new_definition=new_definition,
+                    changelog=fix_description,
+                    bump=bump,
+                )
 
             logger.info(
                 "PostTaskPipeline: created new version for '%s': %s",

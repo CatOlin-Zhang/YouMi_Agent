@@ -9,6 +9,10 @@ ToolGuardianAgent — 工具全局记忆守护 Agent
 5. P6 全局记忆闭环：接入 GlobalMemory 后，
    - 修复前查询该工具的历史经验作为修复上下文（known_issues/fix_history）
    - 修复成功后写入 BUG_FIX 经验，并将历史未解决问题标记 resolved
+6. 回归闭环（版本规则）：
+   - 动手修复前收集现场信息与历史提交（版本链 + 代码库最近提交）
+   - 自动修复无实质变更时进入重试队列，累计 AUTO_FIX_MAX_ATTEMPTS 次仍失败才转人工审批
+   - 修复成功后按修订号提交新版本（仅修 bug，不提升功能位）
 
 工作流程：
 1. 其他 Agent 连接 ToolGuardianAgent（connect_guardian）
@@ -53,9 +57,13 @@ ToolGuardianAgent — 工具全局记忆守护 Agent
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import subprocess
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 from youmi.core.agent import Agent, AgentConfig, AgentStatus
@@ -66,6 +74,11 @@ from youmi.core.types import (
     LLMConfig,
     MemoryConfig,
     MessageRole,
+)
+from youmi.core.versioning import (
+    AUTO_FIX_MAX_ATTEMPTS,
+    EVIDENCE_HISTORY_LIMIT,
+    ChangeKind,
 )
 from youmi.coordinator.fix_strategies import FixStrategiesMixin
 from youmi.llm.client import LLMClient
@@ -158,6 +171,9 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
         memory_strategy: str | None = None,
         llm_call: Any | None = None,
         global_memory: Any | None = None,
+        tool_store: Any | None = None,
+        approval_manager: Any | None = None,
+        repo_root: str | None = None,
     ) -> None:
         """
         Args:
@@ -168,6 +184,12 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
             global_memory: GlobalMemory 实例（可选），接入后形成 P6 闭环：
                 修复前查询该工具的历史经验作为上下文，
                 修复成功后写入 BUG_FIX 经验并标记旧问题已解决
+            tool_store: ToolStore 实例（可选），用于收集历史提交
+                并在修复成功后提交修订号版本
+            approval_manager: ApprovalManager 实例（可选），
+                自动修复多次无效后提交人工审批
+            repo_root: 代码库根目录（可选，默认当前工作目录），
+                用于收集 git 历史提交作为现场信息
         """
         if config is None:
             config = AgentConfig(
@@ -187,6 +209,9 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
 
         self._mcp_server = mcp_server
         self._global_memory = global_memory
+        self._tool_store = tool_store
+        self._approval_manager = approval_manager
+        self._repo_root = repo_root or os.getcwd()
 
         # 收集到的汇报历史: tool_name → [ToolIssueReport]
         self._reports: dict[str, list[ToolIssueReport]] = defaultdict(list)
@@ -196,6 +221,9 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
 
         # 待处理的汇报队列（从消息总线获取后暂存）
         self._pending_reports: list[ToolIssueReport] = []
+
+        # 回归闭环: 工具名 → 已尝试但未奏效的自动修复次数
+        self._fix_attempts: dict[str, int] = {}
 
         # 注册内置工具
         self._register_guardian_tools()
@@ -318,11 +346,13 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
         流程:
         1. 读取当前工具定义
         2. 从全局记忆查询该工具的历史经验（P6 闭环，可选）
+        2.5 收集现场信息与历史提交（版本链 + git 最近提交）
         3. 分析问题类型集合
-        4. 使用 LLM（如果有）或规则引擎生成新描述（注入历史经验）
+        4. 使用 LLM（如果有）或规则引擎生成新描述（注入历史经验与现场信息）
         5. 应用修改到 MCPServer
         6. 记录修改历史
         7. 修复成功后写回全局记忆：BUG_FIX 经验 + 标记旧问题已解决（P6 闭环）
+        8. 回归闭环：无实质变更 → 重试；达上限 → 转人工；成功 → 提交修订版本
 
         Args:
             tool_name: 工具名
@@ -337,6 +367,10 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
             "issue_types": [r.issue_type.value for r in reports],
             "description_updated": False,
             "code_suggestion": "",
+            "fix_attempts": 0,
+            "retry_scheduled": False,
+            "escalated": False,
+            "evidence": {},
         }
 
         # 1. 读取当前工具定义
@@ -354,6 +388,15 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
         if tool_knowledge is not None and not tool_knowledge.is_empty:
             result["knowledge_entries"] = len(tool_knowledge.entry_ids)
 
+        # 2.5 回归闭环：收集现场信息与历史提交（版本链 + 代码库最近提交）
+        evidence = await self._collect_evidence(tool_name, reports, current_defn)
+        result["evidence"] = {
+            "current_version": evidence.get("current_version", ""),
+            "version_history": len(evidence.get("version_history", [])),
+            "git_commits": len(evidence.get("git_commits", [])),
+            "reporter_agents": evidence.get("reporter_agents", []),
+        }
+
         # 3. 分析问题类型
         issue_types = [r.issue_type for r in reports]
         primary_type = max(set(issue_types), key=issue_types.count)
@@ -366,6 +409,7 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
             reports=reports,
             primary_type=primary_type,
             tool_knowledge=tool_knowledge,
+            evidence=evidence,
         )
 
         # 5. 应用修改到 MCPServer
@@ -404,7 +448,236 @@ class ToolGuardianAgent(FixStrategiesMixin, Agent):
             if memory_result is not None:
                 result["memory_updated"] = memory_result
 
+        # 9. 回归闭环：判定修复是否有效 → 提交修订版本 / 重试 / 转人工
+        changed = bool(
+            (new_description and new_description != old_description)
+            or param_updates
+            or code_suggestion
+        )
+        attempts = self._fix_attempts.get(tool_name, 0)
+        if changed:
+            self._fix_attempts.pop(tool_name, None)
+            result["fix_attempts"] = attempts + 1
+            if self._tool_store is not None:
+                fix_tool_id = await self._commit_fix_version(
+                    tool_name,
+                    new_description or old_description,
+                    param_updates,
+                    reports,
+                    evidence=evidence,
+                )
+                if fix_tool_id:
+                    result["fix_version"] = fix_tool_id
+        else:
+            attempts += 1
+            self._fix_attempts[tool_name] = attempts
+            result["fix_attempts"] = attempts
+            result["error"] = (
+                f"自动修复未产生实质变更 "
+                f"(第 {attempts}/{AUTO_FIX_MAX_ATTEMPTS} 次)"
+            )
+            if attempts >= AUTO_FIX_MAX_ATTEMPTS:
+                self._fix_attempts.pop(tool_name, None)
+                result.update(
+                    await self._escalate_to_human(tool_name, reports, attempts)
+                )
+            else:
+                # 重新入队：下一轮携带现场信息与历史经验再次尝试
+                self._pending_reports.extend(reports)
+                result["retry_scheduled"] = True
+
         return result
+
+    # -----------------------------------------------------------------------
+    # 回归闭环（现场收集 / 重试 / 转人工 / 修订版本）
+    # -----------------------------------------------------------------------
+
+    async def _collect_evidence(
+        self,
+        tool_name: str,
+        reports: list[ToolIssueReport],
+        current_defn: ToolDefinition,
+    ) -> dict[str, Any]:
+        """收集回归现场信息与历史提交
+
+        包括：问题汇报现场（报错/参数/汇报人）、当前定义快照、
+        ToolStore 版本链最近提交、代码库 git 最近提交。
+        任一来源失败均静默降级，不阻断修复流程。
+        """
+        evidence: dict[str, Any] = {
+            "tool_name": tool_name,
+            "collected_at": datetime.utcnow().isoformat(),
+            "reporter_agents": sorted(
+                {r.reporter_agent_id for r in reports if r.reporter_agent_id}
+            ),
+            "error_messages": [r.error_message[:200] for r in reports[:5]],
+            "call_arguments": [dict(r.call_arguments) for r in reports[:5]],
+            "current_version": getattr(current_defn, "version", ""),
+            "current_description": current_defn.description[:300],
+            "version_history": [],
+            "git_commits": [],
+        }
+
+        if self._tool_store is not None:
+            try:
+                chain = await self._tool_store.get_version_chain(tool_name)
+                evidence["version_history"] = [
+                    {
+                        "version": item.version,
+                        "parent_version_id": item.parent_version_id,
+                        "changelog": (item.changelog or "")[:200],
+                    }
+                    for item in chain[:EVIDENCE_HISTORY_LIMIT]
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "ToolGuardian failed to collect version history for '%s': %s",
+                    tool_name, exc,
+                )
+
+        evidence["git_commits"] = await self._collect_git_history(tool_name)
+        return evidence
+
+    async def _collect_git_history(self, tool_name: str) -> list[str]:
+        """收集代码库最近提交（非 git 仓库时返回空列表）"""
+        root = self._repo_root
+        if not root or not os.path.isdir(os.path.join(root, ".git")):
+            return []
+
+        def _run() -> list[str]:
+            messages: list[str] = []
+            commands = [
+                ["git", "log", "-n", "5", "--oneline"],
+                ["git", "log", "-n", "5", "--oneline", "--grep", tool_name],
+            ]
+            for cmd in commands:
+                try:
+                    proc = subprocess.run(
+                        cmd, cwd=root, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=5,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if proc.returncode == 0:
+                    messages.extend(
+                        line.strip()
+                        for line in proc.stdout.splitlines()
+                        if line.strip()
+                    )
+
+            unique: list[str] = []
+            seen: set[str] = set()
+            for message in messages:
+                if message in seen:
+                    continue
+                seen.add(message)
+                unique.append(message)
+            return unique[:EVIDENCE_HISTORY_LIMIT]
+
+        return await asyncio.to_thread(_run)
+
+    async def _commit_fix_version(
+        self,
+        tool_name: str,
+        new_description: str,
+        param_updates: dict[str, str],
+        reports: list[ToolIssueReport],
+        evidence: dict[str, Any] | None = None,
+    ) -> str | None:
+        """修复成功后提交修订号版本（change_kind=fix）
+
+        版本规则：仅修复 bug、不涉及功能变化 → 只提交修订号（patch）。
+        现场信息与历史提交写入 changelog（可追溯），不污染工具描述。
+
+        Returns:
+            新版本 tool_id；工具不在 ToolStore 中时返回 None
+        """
+        try:
+            head = await self._tool_store.get_head_version(tool_name)
+            if head is None:
+                return None
+
+            defn = head.definition
+            updated_params = [
+                p.model_copy(update={"description": param_updates[p.name]})
+                if p.name in param_updates else p
+                for p in defn.parameters
+            ]
+            updated_defn = defn.model_copy(update={
+                "description": new_description or defn.description,
+                "parameters": updated_params,
+            })
+
+            first = reports[0]
+            changelog = (
+                f"回归修复({first.issue_type.value}): "
+                f"{first.error_message[:80]}"
+            )
+            if evidence:
+                baseline = evidence.get("current_version") or "?"
+                changelog += f" | 基线 v{baseline}"
+                commits = evidence.get("git_commits") or []
+                if commits:
+                    changelog += f" | 最近提交: {commits[0][:80]}"
+            tool_id = await self._tool_store.create_version(
+                tool_name,
+                updated_defn,
+                changelog=changelog,
+                change_kind=ChangeKind.FIX.value,
+            )
+            logger.info(
+                "ToolGuardian committed fix version %s for '%s'",
+                tool_id, tool_name,
+            )
+            return tool_id
+        except Exception as exc:
+            logger.warning(
+                "ToolGuardian failed to commit fix version for '%s': %s",
+                tool_name, exc,
+            )
+            return None
+
+    async def _escalate_to_human(
+        self,
+        tool_name: str,
+        reports: list[ToolIssueReport],
+        attempts: int,
+    ) -> dict[str, Any]:
+        """自动修复多次无效 → 转人工审批"""
+        out: dict[str, Any] = {"escalated": True}
+        first = reports[0]
+        reason = (
+            f"回归修复 {attempts} 次仍未解决 '{tool_name}': "
+            f"[{first.issue_type.value}] {first.error_message[:160]}"
+        )
+        out["escalation_reason"] = reason
+
+        if self._approval_manager is None:
+            out["escalation_note"] = "未接入审批管理器, 已记录待人工处理"
+            logger.error("ToolGuardian escalation: %s", reason)
+            return out
+
+        try:
+            record = self._approval_manager.submit_request(
+                agent_id=self.agent_id,
+                tool_name=tool_name,
+                risk_level=getattr(first, "risk_level", None) or None,
+            )
+            record.reason = reason
+            out["approval_record_id"] = record.record_id
+            out["approval_level"] = getattr(
+                record.level, "value", str(record.level),
+            )
+            logger.warning(
+                "ToolGuardian escalated '%s' to human approval: %s",
+                tool_name, reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ToolGuardian escalation failed for '%s': %s", tool_name, exc,
+            )
+            out["escalation_note"] = f"审批提交失败: {exc}"
+        return out
 
     # -----------------------------------------------------------------------
     # P6 全局记忆闭环

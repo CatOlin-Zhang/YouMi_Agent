@@ -100,7 +100,13 @@ class ToolDefinition(BaseModel):
     name: str = Field(description="工具名称 (唯一标识)")
     description: str = Field(default="", description="工具功能描述")
     parameters: list[ToolParameter] = Field(default_factory=list)
-    version: str = Field(default="0.0.1", description="语义化版本号")
+    version: str = Field(
+        default="0.0.1",
+        description=(
+            "语义化版本号 主.次.修订 (见 youmi.core.versioning): "
+            "外部接入默认 1.0.0, 系统自生成默认 0.0.1 候选"
+        ),
+    )
     language: str = Field(default="python", description="工具实现语言")
     runtime: str = Field(default="python", description="运行时标识")
     risk_level: str = Field(
@@ -331,10 +337,11 @@ class ToolRegistry:
 class ToolVersion(BaseModel):
     """工具版本记录 — 存储在 ToolStore 中的版本树节点
 
-    版本号格式为语义化版本 (semver): major.minor.patch
-    - patch: bug 修复，不改版本号 (通过 changelog 记录)
-    - minor: 功能增强或说明更新
-    - major: 破坏性变更
+    版本号格式为语义化版本: 主版本号.次版本号.修订号
+    - 主版本号: 不兼容下层的修改
+    - 次版本号: 兼容下层的功能新增
+    - 修订号: 仅修复 bug (含回归修复)
+    - 阶段: 0.x.y = 候选库 (candidate), >= 1.0.0 = 正式库 (stable)
 
     Args:
         version: 语义化版本号 (如 "0.0.1")
@@ -346,6 +353,7 @@ class ToolVersion(BaseModel):
         is_head: 是否为该分支当前 head
         diff_patch: 与 parent 的结构化 diff (added/removed/changed
             三段 JSON, 见 youmi.mcp.tool_store._dict_diff)
+        stage: 版本阶段 candidate (候选库) / stable (正式库)
     """
 
     version: str
@@ -356,14 +364,19 @@ class ToolVersion(BaseModel):
     branch: str = "main"
     is_head: bool = False
     diff_patch: str = ""
+    stage: str = "candidate"
 
 
 def bump_version(current: str, bump_type: str = "patch") -> str:
-    """语义化版本号自增
+    """语义化版本号自增 (主版本号.次版本号.修订号)
+
+    单纯的位自增; 变更类型 → 位 的业务映射见
+    ``youmi.core.versioning.bump_for`` (0.x 阶段破坏性变更只提升次版本)。
 
     Args:
         current: 当前版本号 (如 "1.2.3")
-        bump_type: 自增类型 "patch" | "minor" | "major"
+        bump_type: 自增类型 "patch" (仅修复) | "minor" (兼容新增) |
+            "major" (不兼容下层)
 
     Returns:
         新版本号

@@ -62,6 +62,19 @@ from youmi.core.tool import (
     bump_version,
     risk_rank,
 )
+from youmi.core.versioning import (
+    STABLE_INITIAL_VERSION,
+    ChangeKind,
+    ToolOrigin,
+    VersionStage,
+    bump_for,
+    compare_versions,
+    initial_version,
+    is_stable,
+    normalize_origin,
+    resolve_initial_version,
+    stage_of,
+)
 from youmi.mcp.summary import SummaryGenerator
 
 if TYPE_CHECKING:
@@ -192,6 +205,8 @@ CREATE TABLE IF NOT EXISTS tools (
     branch TEXT DEFAULT 'main',
     is_head INTEGER DEFAULT 1,
     diff_patch TEXT DEFAULT '',
+    origin TEXT DEFAULT 'generated',
+    stage TEXT DEFAULT 'candidate',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -199,6 +214,7 @@ CREATE TABLE IF NOT EXISTS tools (
 CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(tool_name);
 CREATE INDEX IF NOT EXISTS idx_tools_provider ON tools(provider_id);
 CREATE INDEX IF NOT EXISTS idx_tools_lineage ON tools(lineage_id);
+CREATE INDEX IF NOT EXISTS idx_tools_stage ON tools(stage);
 
 -- 降级用 JSON 向量表 (仅当 sqlite-vec 不可用时使用)
 -- level 区分 L1 (摘要向量) / L2 (摘要的摘要向量) 双层索引
@@ -378,6 +394,8 @@ class ToolStore:
                     branch TEXT DEFAULT 'main',
                     is_head INTEGER DEFAULT 1,
                     diff_patch TEXT DEFAULT '',
+                    origin TEXT DEFAULT 'generated',
+                    stage TEXT DEFAULT 'candidate',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -385,7 +403,7 @@ class ToolStore:
                     parent_version_id, provider_id, summary, definition_json,
                     handler_module, language, runtime, essential, risk_level,
                     required_permissions, lineage_id, summary_l2, branch,
-                    is_head, diff_patch, created_at, updated_at)
+                    is_head, diff_patch, origin, stage, created_at, updated_at)
                     SELECT rowid, tool_id, tool_name, version,
                     parent_version_id, provider_id, summary, definition_json,
                     handler_module, language, runtime, essential,
@@ -394,6 +412,11 @@ class ToolStore:
                     COALESCE(lineage_id, tool_name),
                     COALESCE(summary_l2, ''), COALESCE(branch, 'main'),
                     COALESCE(is_head, 1), COALESCE(diff_patch, ''),
+                    COALESCE(origin, 'generated'),
+                    COALESCE(stage, CASE
+                        WHEN CAST(substr(version, 1,
+                            instr(version || '.', '.') - 1) AS INTEGER) >= 1
+                        THEN 'stable' ELSE 'candidate' END),
                     created_at, updated_at
                     FROM tools;
                 DROP TABLE tools;
@@ -424,6 +447,9 @@ class ToolStore:
             ("branch", "ALTER TABLE tools ADD COLUMN branch TEXT DEFAULT 'main'"),
             ("is_head", "ALTER TABLE tools ADD COLUMN is_head INTEGER DEFAULT 1"),
             ("diff_patch", "ALTER TABLE tools ADD COLUMN diff_patch TEXT DEFAULT ''"),
+            # 版本规则: 来源 (external/generated) + 阶段 (candidate/stable)
+            ("origin", "ALTER TABLE tools ADD COLUMN origin TEXT DEFAULT 'generated'"),
+            ("stage", "ALTER TABLE tools ADD COLUMN stage TEXT DEFAULT 'candidate'"),
         ]
         changed = False
         for col_name, ddl in migrations:
@@ -431,6 +457,16 @@ class ToolStore:
                 conn.execute(ddl)
                 changed = True
                 logger.info("ToolStore: migrated tools table, added column '%s'", col_name)
+
+        # 存量行回填阶段: 主版本号 >= 1 → stable (0.x.y 为候选库)
+        if "stage" not in columns:
+            conn.execute(
+                """UPDATE tools SET stage = CASE
+                       WHEN CAST(substr(version, 1,
+                           instr(version || '.', '.') - 1) AS INTEGER) >= 1
+                       THEN 'stable' ELSE 'candidate' END"""
+            )
+            changed = True
 
         if changed:
             conn.commit()
@@ -488,6 +524,12 @@ class ToolStore:
         如果同名同版本已存在则更新，否则新建。
         自动生成 tool_id (格式: "{tool_name}@{version}")。
 
+        版本规则:
+        - 来源 external 且未声明版本 → 1.0.0 (首个正式版, stable)
+        - 来源 generated 且未声明版本 → 0.0.1 (候选库, candidate)
+        - 低版本 upsert 不会篡夺 main 分支更高的 head (避免重复 seed
+          把已晋升的 1.0.0 降级为 0.x)
+
         Args:
             entry: ToolEntry 工具条目
 
@@ -498,7 +540,13 @@ class ToolStore:
 
         conn = self._ensure_conn()
         now = datetime.utcnow().isoformat()
-        version = getattr(entry, 'version', '0.0.1') or '0.0.1'
+        origin = normalize_origin(getattr(entry, 'origin', None))
+        version = resolve_initial_version(
+            getattr(entry, 'version', '')
+            or getattr(entry.definition, 'version', ''),
+            origin,
+        )
+        stage = stage_of(version)
         tool_id = f"{entry.tool_name}@{version}"
         defn_json = entry.definition.model_dump_json()
         summary = entry.summary or entry.definition.description[:80]
@@ -516,16 +564,29 @@ class ToolStore:
         def _upsert():
             cursor = conn.cursor()
             try:
-                # 检查是否已存在 (rowid 次级排序消除同微秒碰撞)
-                existing = cursor.execute(
-                    """SELECT id, tool_id, version FROM tools WHERE tool_name = ?
+                # main 分支当前 head (父版本 + 版本高低判定依据)
+                head_row = cursor.execute(
+                    """SELECT tool_id, version FROM tools
+                       WHERE tool_name = ? AND branch = 'main' AND is_head = 1
                        ORDER BY created_at DESC, rowid DESC LIMIT 1""",
                     (entry.tool_name,),
                 ).fetchone()
 
-                parent_id = None
-                if existing:
-                    parent_id = existing[1]  # tool_id of previous version
+                parent_id = head_row[0] if head_row else None
+                head_version = head_row[1] if head_row else None
+                if head_row is None:
+                    # 无 head (异常/旧库) → 以最新行为父版本
+                    existing = cursor.execute(
+                        """SELECT tool_id FROM tools WHERE tool_name = ?
+                           ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                        (entry.tool_name,),
+                    ).fetchone()
+                    parent_id = existing[0] if existing else None
+
+                # 版本规则: 低于现有 head 的 upsert 不得篡夺 head
+                is_head = 1
+                if head_version and compare_versions(head_version, version) > 0:
+                    is_head = 0
 
                 # INSERT ... ON CONFLICT DO UPDATE 保持 id 稳定
                 cursor.execute(
@@ -534,8 +595,9 @@ class ToolStore:
                                           language, runtime, essential,
                                           risk_level, required_permissions, lineage_id,
                                           summary_l2, branch, is_head, diff_patch,
+                                          origin, stage,
                                           created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(tool_id) DO UPDATE SET
                            summary = excluded.summary,
                            definition_json = excluded.definition_json,
@@ -552,7 +614,8 @@ class ToolStore:
                         getattr(entry.definition, 'runtime', 'python'),
                         1 if entry.essential else 0,
                         risk_level, json.dumps(req_perms, ensure_ascii=False), lineage_id,
-                        summary_l2, "main", 1, "",
+                        summary_l2, "main", is_head, "",
+                        origin, stage,
                         now, now,
                     ),
                 )
@@ -564,11 +627,12 @@ class ToolStore:
                 row_id = row[0]
 
                 # 维护同 lineage main 分支唯一 head (版本树语义)
-                cursor.execute(
-                    """UPDATE tools SET is_head = 0
-                       WHERE tool_name = ? AND branch = 'main' AND tool_id != ?""",
-                    (entry.tool_name, tool_id),
-                )
+                if is_head:
+                    cursor.execute(
+                        """UPDATE tools SET is_head = 0
+                           WHERE tool_name = ? AND branch = 'main' AND tool_id != ?""",
+                        (entry.tool_name, tool_id),
+                    )
 
                 # 更新向量 (L1 摘要向量; L2 在 update_embedding/rebuild 时生成)
                 if entry.embedding:
@@ -603,7 +667,7 @@ class ToolStore:
                     """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                               summary, definition_json, language, runtime, essential,
                               risk_level, required_permissions, lineage_id, summary_l2,
-                              created_at, updated_at
+                              origin, stage, created_at, updated_at
                        FROM tools WHERE tool_id = ?""",
                     (tool_id,),
                 ).fetchone()
@@ -612,8 +676,8 @@ class ToolStore:
                     """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                               summary, definition_json, language, runtime, essential,
                               risk_level, required_permissions, lineage_id, summary_l2,
-                              created_at, updated_at
-                       FROM tools WHERE tool_name = ?
+                              origin, stage, created_at, updated_at
+                       FROM tools WHERE tool_name = ? AND branch = 'main'
                        ORDER BY created_at DESC, rowid DESC LIMIT 1""",
                     (tool_name,),
                 ).fetchone()
@@ -649,8 +713,8 @@ class ToolStore:
                 """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                           summary, definition_json, language, runtime, essential,
                           risk_level, required_permissions, lineage_id, summary_l2,
-                          created_at, updated_at
-                   FROM tools WHERE lineage_id = ?
+                          origin, stage, created_at, updated_at
+                   FROM tools WHERE lineage_id = ? AND branch = 'main'
                    ORDER BY created_at ASC, rowid ASC LIMIT 1""",
                 (lineage_id,),
             ).fetchone()
@@ -660,8 +724,8 @@ class ToolStore:
                     """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                               summary, definition_json, language, runtime, essential,
                               risk_level, required_permissions, lineage_id, summary_l2,
-                              created_at, updated_at
-                       FROM tools WHERE tool_name = ?
+                              origin, stage, created_at, updated_at
+                       FROM tools WHERE tool_name = ? AND branch = 'main'
                        ORDER BY created_at ASC, rowid ASC LIMIT 1""",
                     (lineage_id,),
                 ).fetchone()
@@ -690,8 +754,8 @@ class ToolStore:
                 """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                           summary, definition_json, language, runtime, essential,
                           risk_level, required_permissions, lineage_id, summary_l2,
-                          created_at, updated_at
-                   FROM tools WHERE lineage_id = ?
+                          origin, stage, created_at, updated_at
+                   FROM tools WHERE lineage_id = ? AND branch = 'main'
                    ORDER BY created_at DESC, rowid DESC LIMIT 1""",
                 (lineage_id,),
             ).fetchone()
@@ -701,8 +765,8 @@ class ToolStore:
                     """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                               summary, definition_json, language, runtime, essential,
                               risk_level, required_permissions, lineage_id, summary_l2,
-                              created_at, updated_at
-                       FROM tools WHERE tool_name = ?
+                              origin, stage, created_at, updated_at
+                       FROM tools WHERE tool_name = ? AND branch = 'main'
                        ORDER BY created_at DESC, rowid DESC LIMIT 1""",
                     (lineage_id,),
                 ).fetchone()
@@ -712,25 +776,42 @@ class ToolStore:
 
         return await asyncio.to_thread(_get)
 
-    async def list_tools(self) -> list[ToolEntry]:
-        """列出所有工具 (每个工具仅返回最新版本)"""
+    async def list_tools(
+        self,
+        stage: str | None = None,
+        origin: str | None = None,
+    ) -> list[ToolEntry]:
+        """列出所有工具 (每个工具仅返回 main 分支 head 版本)
+
+        Args:
+            stage: 阶段过滤 "candidate" / "stable" (None = 不限)
+            origin: 来源过滤 "external" / "generated" (None = 不限)
+
+        Returns:
+            ToolEntry 列表
+        """
         conn = self._ensure_conn()
 
         def _list():
-            # 使用子查询获取每个工具的最新版本
+            clauses = ["t.branch = 'main'", "t.is_head = 1"]
+            params: list[Any] = []
+            if stage:
+                clauses.append("t.stage = ?")
+                params.append(stage)
+            if origin:
+                clauses.append("t.origin = ?")
+                params.append(normalize_origin(origin))
+
             rows = conn.execute(
-                """SELECT t.tool_id, t.tool_name, t.version, t.parent_version_id,
+                f"""SELECT t.tool_id, t.tool_name, t.version, t.parent_version_id,
                           t.provider_id, t.summary, t.definition_json,
                           t.language, t.runtime, t.essential,
                           t.risk_level, t.required_permissions, t.lineage_id, t.summary_l2,
-                          t.created_at, t.updated_at
+                          t.origin, t.stage, t.created_at, t.updated_at
                    FROM tools t
-                   INNER JOIN (
-                       SELECT tool_name, MAX(created_at) as max_created
-                       FROM tools GROUP BY tool_name
-                   ) latest ON t.tool_name = latest.tool_name
-                           AND t.created_at = latest.max_created
-                   ORDER BY t.tool_name"""
+                   WHERE {' AND '.join(clauses)}
+                   ORDER BY t.tool_name""",
+                tuple(params),
             ).fetchall()
 
             entries = []
@@ -802,11 +883,18 @@ class ToolStore:
         changelog: str = "",
         bump: str = "patch",
         branch: str = "main",
+        change_kind: str | None = None,
     ) -> str:
         """创建工具新版本 (从指定分支 head 分叉)
 
         自增版本号，写入新 tools 行 (含与 parent 的结构化 diff_patch)
         + 双层向量; 维护同 branch 唯一 is_head。
+
+        版本提升规则 (见 youmi.core.versioning):
+        - change_kind="fix" / bump="patch" → 修订号 (仅修复 bug)
+        - change_kind="feature" / bump="minor" → 次版本号 (兼容新增)
+        - change_kind="breaking" / bump="major" → 主版本号 (不兼容下层)
+        - 0.x 候选阶段破坏性变更只提升次版本号 (不绕过晋升直接到 1.0.0)
 
         tool_id 格式: main 分支 "{tool}@{version}" (兼容旧格式);
         非 main 分支 "{tool}@{branch}/{version}" 避免撞号。
@@ -815,8 +903,9 @@ class ToolStore:
             tool_name: 工具名称
             new_definition: 新的工具定义
             changelog: 版本变更说明 (自动挂到新版本行)
-            bump: 自增类型 "patch" | "minor" | "major"
+            bump: 自增类型 "patch" | "minor" | "major" (change_kind 缺省时生效)
             branch: 目标分支 (从该分支 head 分叉; 默认 "main")
+            change_kind: 变更类型 "breaking" | "feature" | "fix" (优先于 bump)
 
         Returns:
             新版本 tool_id
@@ -831,7 +920,7 @@ class ToolStore:
         def _create():
             # 获取指定分支的 head 版本
             row = conn.execute(
-                """SELECT tool_id, version, definition_json FROM tools
+                """SELECT tool_id, version, definition_json, origin FROM tools
                    WHERE tool_name = ? AND branch = ?
                    ORDER BY created_at DESC, rowid DESC LIMIT 1""",
                 (tool_name, branch),
@@ -840,8 +929,12 @@ class ToolStore:
             if row is None:
                 raise ValueError(f"Tool '{tool_name}' not found in store")
 
-            old_tool_id, old_version, old_defn_json = row
-            new_version = bump_version(old_version, bump)
+            old_tool_id, old_version, old_defn_json, _origin = row
+            new_version = (
+                bump_for(old_version, change_kind) if change_kind
+                else bump_version(old_version, bump)
+            )
+            stage = stage_of(new_version)
             if branch == "main":
                 new_tool_id = f"{tool_name}@{new_version}"
             else:
@@ -867,9 +960,11 @@ class ToolStore:
                                           language, runtime, essential,
                                           risk_level, required_permissions, lineage_id,
                                           summary_l2, branch, is_head, diff_patch,
+                                          origin, stage,
                                           created_at, updated_at)
                        SELECT ?, ?, ?, ?, provider_id, ?, ?,
-                              ?, ?, essential, ?, ?, lineage_id, ?, ?, 1, ?, ?, ?
+                              ?, ?, essential, ?, ?, lineage_id, ?, ?, 1, ?,
+                              origin, ?, ?, ?
                        FROM tools WHERE tool_id = ?
                     """,
                     (
@@ -878,7 +973,7 @@ class ToolStore:
                         getattr(new_definition, 'language', 'python'),
                         getattr(new_definition, 'runtime', 'python'),
                         new_risk, json.dumps(new_perms, ensure_ascii=False),
-                        new_l2, branch, diff_patch, now, now, old_tool_id,
+                        new_l2, branch, diff_patch, stage, now, now, old_tool_id,
                     ),
                 )
 
@@ -993,11 +1088,12 @@ class ToolStore:
                                           language, runtime, essential,
                                           risk_level, required_permissions, lineage_id,
                                           summary_l2, branch, is_head, diff_patch,
+                                          origin, stage,
                                           created_at, updated_at)
                        SELECT ?, tool_name, version, ?, provider_id, summary,
                               definition_json, language, runtime, essential,
                               risk_level, required_permissions, lineage_id,
-                              summary_l2, ?, 1, ?, ?, ?
+                              summary_l2, ?, 1, ?, origin, stage, ?, ?
                        FROM tools WHERE tool_id = ?
                     """,
                     (branch_tool_id, base_tool_id, branch_name,
@@ -1136,6 +1232,176 @@ class ToolStore:
                      tool_name, to_version, new_tool_id)
         return new_tool_id
 
+    # ------------------------------------------------------------------
+    # 候选库 → 正式库 (版本规则)
+    # ------------------------------------------------------------------
+
+    async def promote_to_stable(
+        self,
+        tool_name: str,
+        evidence: str = "",
+    ) -> str | None:
+        """晋升候选工具为正式版 1.0.0 (候选库 → 正式库)
+
+        规则: 系统自生成工具从 0.0.1 起步, 自动测试 + 任务中连续成功
+        调用达到阈值后, 才以 1.0.0 进入正式库。晋升不删除历史:
+        新版本行 parent = main 分支当前 head, diff_patch 记录与父版本差异,
+        changelog 记录晋升依据 (change_type='promote')。
+
+        Args:
+            tool_name: 工具名称
+            evidence: 晋升依据 (成功调用次数 / 任务 ID / 测试结果)
+
+        Returns:
+            1.0.0 版本的 tool_id; 已是正式版或工具不存在时返回 None
+        """
+        head = await self.get_head_version(tool_name)
+        if head is None or is_stable(head.version):
+            return None
+
+        conn = self._ensure_conn()
+        now = datetime.utcnow().isoformat()
+        new_tool_id = f"{tool_name}@{STABLE_INITIAL_VERSION}"
+
+        # 晋升定义: 内容不变, 仅版本号进入 1.0.0 正式线
+        defn = head.definition.model_copy(
+            update={"version": STABLE_INITIAL_VERSION},
+        )
+        defn_json = defn.model_dump_json()
+        summary = head.summary or defn.description[:80]
+        summary_l2 = head.summary_l2 or summary[:30]
+        try:
+            diff_patch = json.dumps(
+                _dict_diff(
+                    json.loads(head.definition.model_dump_json()),
+                    json.loads(defn_json),
+                ),
+                ensure_ascii=False,
+            )
+        except (json.JSONDecodeError, TypeError):
+            diff_patch = ""
+
+        def _promote():
+            row = conn.execute(
+                """SELECT tool_id, origin FROM tools
+                   WHERE tool_name = ? AND branch = 'main' AND is_head = 1
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (tool_name,),
+            ).fetchone()
+            if row is None:
+                return None
+            parent_id, origin = row
+
+            exists = conn.execute(
+                "SELECT 1 FROM tools WHERE tool_id = ?", (new_tool_id,),
+            ).fetchone()
+            if exists:
+                return new_tool_id, None  # 幂等: 已是正式版
+
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """INSERT INTO tools (tool_id, tool_name, version, parent_version_id,
+                                          provider_id, summary, definition_json,
+                                          language, runtime, essential,
+                                          risk_level, required_permissions, lineage_id,
+                                          summary_l2, branch, is_head, diff_patch,
+                                          origin, stage,
+                                          created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_tool_id, tool_name, STABLE_INITIAL_VERSION, parent_id,
+                        head.provider_id, summary, defn_json,
+                        head.language, head.definition.runtime, 1 if head.essential else 0,
+                        head.risk_level,
+                        json.dumps(list(head.required_permissions), ensure_ascii=False),
+                        head.lineage_id or tool_name,
+                        summary_l2, "main", diff_patch,
+                        normalize_origin(origin), VersionStage.STABLE.value,
+                        now, now,
+                    ),
+                )
+                cursor.execute(
+                    """UPDATE tools SET is_head = 0
+                       WHERE tool_name = ? AND branch = 'main' AND tool_id != ?""",
+                    (tool_name, new_tool_id),
+                )
+                cursor.execute(
+                    """INSERT INTO tool_changelogs (tool_id, change_type, description,
+                                                    created_at, source)
+                       VALUES (?, 'promote', ?, ?, 'system')""",
+                    (
+                        new_tool_id,
+                        f"promote to {STABLE_INITIAL_VERSION}"
+                        + (f": {evidence}" if evidence else ""),
+                        now,
+                    ),
+                )
+                conn.commit()
+                row2 = cursor.execute(
+                    "SELECT id FROM tools WHERE tool_id = ?", (new_tool_id,),
+                ).fetchone()
+                return new_tool_id, (row2[0] if row2 else None)
+            except Exception:
+                conn.rollback()
+                raise
+
+        result = await asyncio.to_thread(_promote)
+        if result is None:
+            return None
+        promoted_id, new_row_id = result
+
+        await self._embed_tool_row(
+            new_row_id, promoted_id, tool_name, summary, summary_l2,
+        )
+        logger.info(
+            "ToolStore: promoted '%s' %s → %s (%s)",
+            tool_name, head.version, STABLE_INITIAL_VERSION, evidence or "no evidence",
+        )
+        return promoted_id
+
+    async def mark_external(self, tool_name: str) -> str | None:
+        """将工具标记为外部接入 (外部 Skill 携带的工具)
+
+        规则: 外部接入的工具默认 1.0.0 正式版。
+        - 所有版本行 origin → external (来源是工具级属性)
+        - main head 仍为候选 (0.x.y) → 以 1.0.0 晋升正式库
+        - 已是正式版 → 仅改来源标记, 返回当前 head tool_id
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            当前正式版 tool_id; 工具不存在时返回 None
+        """
+        head = await self.get_head_version(tool_name)
+        if head is None:
+            return None
+
+        conn = self._ensure_conn()
+
+        def _mark():
+            conn.execute(
+                "UPDATE tools SET origin = ? WHERE tool_name = ?",
+                (ToolOrigin.EXTERNAL.value, tool_name),
+            )
+            conn.commit()
+
+        await asyncio.to_thread(_mark)
+
+        if not is_stable(head.version):
+            return await self.promote_to_stable(
+                tool_name,
+                evidence="外部接入: 首版即正式版 1.0.0",
+            )
+
+        logger.info(
+            "ToolStore: marked '%s' as external (head=%s)",
+            tool_name, head.version,
+        )
+        return f"{tool_name}@{head.version}"
+
     async def get_version_tree(self, lineage_id: str) -> dict[str, list[ToolVersion]]:
         """获取版本树 — branch 分组的版本列表 (Git 版本树)
 
@@ -1184,6 +1450,7 @@ class ToolStore:
                     branch=branch or "main",
                     is_head=bool(is_head),
                     diff_patch=diff_patch or "",
+                    stage=stage_of(version),
                 ))
             return tree
 
@@ -1232,6 +1499,7 @@ class ToolStore:
                     branch=branch or "main",
                     is_head=bool(is_head),
                     diff_patch=diff_patch or "",
+                    stage=stage_of(version),
                 ))
             return chain
 
@@ -1846,12 +2114,7 @@ class ToolStore:
                 f"""SELECT t.tool_name, t.definition_json, t.summary,
                            t.risk_level, t.required_permissions, t.lineage_id
                     FROM tools t
-                    INNER JOIN (
-                        SELECT tool_name, MAX(created_at) as max_created
-                        FROM tools GROUP BY tool_name
-                    ) latest ON t.tool_name = latest.tool_name
-                            AND t.created_at = latest.max_created
-                    WHERE {cone_sql}""",
+                    WHERE t.branch = 'main' AND t.is_head = 1 AND {cone_sql}""",
                 cone_params,
             ).fetchall()
             return rows
@@ -1932,7 +2195,7 @@ class ToolStore:
                 """SELECT tool_id, tool_name, version, parent_version_id, provider_id,
                           summary, definition_json, language, runtime, essential,
                           risk_level, required_permissions, lineage_id, summary_l2,
-                          created_at, updated_at
+                          origin, stage, created_at, updated_at
                    FROM tools WHERE tool_id = ?""",
                 (tool_id,),
             ).fetchone()
@@ -1988,7 +2251,7 @@ class ToolStore:
                           t.provider_id, t.summary, t.definition_json,
                           t.language, t.runtime, t.essential,
                           t.risk_level, t.required_permissions, t.lineage_id, t.summary_l2,
-                          t.created_at, t.updated_at
+                          t.origin, t.stage, t.created_at, t.updated_at
                    FROM tools t
                    JOIN tool_tags tt ON t.tool_id = tt.tool_id
                    WHERE tt.tag IN ({placeholders})
@@ -2053,10 +2316,20 @@ class ToolStore:
         if row is None:
             return None
 
-        (tool_id, tool_name, version, parent_version_id, provider_id,
-         summary, defn_json, language, runtime, essential,
-         risk_level, required_permissions_json, lineage_id, summary_l2,
-         created_at, updated_at) = row
+        if len(row) >= 18:
+            (tool_id, tool_name, version, parent_version_id, provider_id,
+             summary, defn_json, language, runtime, essential,
+             risk_level, required_permissions_json, lineage_id, summary_l2,
+             origin, stage, created_at, updated_at) = row[:18]
+        else:
+            # 兼容旧调用方传 16 列 (无 origin/stage) 的行
+            (tool_id, tool_name, version, parent_version_id, provider_id,
+             summary, defn_json, language, runtime, essential,
+             risk_level, required_permissions_json, lineage_id, summary_l2,
+             created_at, updated_at) = row
+            origin, stage = ToolOrigin.GENERATED.value, ""
+        if not stage:
+            stage = stage_of(version)
 
         try:
             defn = ToolDefinition.model_validate_json(defn_json)
@@ -2118,6 +2391,8 @@ class ToolStore:
             risk_level=risk_level or RiskLevel.LOW,
             required_permissions=required_permissions,
             lineage_id=lineage_id or tool_name,
+            origin=normalize_origin(origin),
+            stage=stage,
         )
         return entry
 
@@ -2139,6 +2414,19 @@ class ToolStore:
             changelogs = conn.execute("SELECT COUNT(*) FROM tool_changelogs").fetchone()[0]
             aliases = conn.execute("SELECT COUNT(*) FROM tool_aliases").fetchone()[0]
             tags = conn.execute("SELECT COUNT(DISTINCT tag) FROM tool_tags").fetchone()[0]
+            heads = conn.execute(
+                "SELECT origin, stage, COUNT(*) FROM tools "
+                "WHERE branch = 'main' AND is_head = 1 GROUP BY origin, stage"
+            ).fetchall()
+            by_origin: dict[str, int] = {}
+            by_stage: dict[str, int] = {}
+            for row_origin, row_stage, count in heads:
+                by_origin[normalize_origin(row_origin)] = (
+                    by_origin.get(normalize_origin(row_origin), 0) + count
+                )
+                by_stage[row_stage or VersionStage.CANDIDATE.value] = (
+                    by_stage.get(row_stage or VersionStage.CANDIDATE.value, 0) + count
+                )
             return {
                 "tools": tools,
                 "versions": versions,
@@ -2146,6 +2434,8 @@ class ToolStore:
                 "changelogs": changelogs,
                 "aliases": aliases,
                 "tags": tags,
+                "by_origin": by_origin,
+                "by_stage": by_stage,
             }
 
         return await asyncio.to_thread(_stats)

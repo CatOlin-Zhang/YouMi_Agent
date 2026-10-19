@@ -36,6 +36,7 @@ class FixStrategiesMixin:
         reports: list[ToolIssueReport],
         primary_type: ToolIssueType,
         tool_knowledge: Any | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, str], str]:
         """生成工具描述修复和代码建议
 
@@ -45,6 +46,8 @@ class FixStrategiesMixin:
             tool_knowledge: 全局记忆中该工具的历史经验 (ToolKnowledge，
                 可选)。注入后 LLM/规则修复可以参考 known_issues、
                 resolved_issues 和 fix_history，避免重复修复
+            evidence: 回归现场信息 (版本历史 / 最近提交 / 环境)，
+                由 ToolGuardian 在动手修复前收集。
 
         Returns:
             (new_description, param_updates, code_suggestion)
@@ -53,13 +56,13 @@ class FixStrategiesMixin:
         if self._llm_client is not None:
             return await self._generate_fix_with_llm(
                 tool_name, current_description, current_params, reports, primary_type,
-                tool_knowledge=tool_knowledge,
+                tool_knowledge=tool_knowledge, evidence=evidence,
             )
 
         # 退化为规则引擎
         return self._generate_fix_with_rules(
             tool_name, current_description, current_params, reports, primary_type,
-            tool_knowledge=tool_knowledge,
+            tool_knowledge=tool_knowledge, evidence=evidence,
         )
 
     async def _generate_fix_with_llm(
@@ -70,6 +73,7 @@ class FixStrategiesMixin:
         reports: list[ToolIssueReport],
         primary_type: ToolIssueType,
         tool_knowledge: Any | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, str], str]:
         """使用 LLM 生成修复方案"""
         # 构建汇报摘要
@@ -111,7 +115,7 @@ class FixStrategiesMixin:
 
 ## 问题汇报
 {chr(10).join(report_summaries)}
-{knowledge_section}
+{knowledge_section}{self._format_evidence(evidence)}
 ## 主要问题类型: {primary_type.value}
 
 ## 要求
@@ -151,8 +155,33 @@ class FixStrategiesMixin:
             logger.warning("ToolGuardian LLM fix generation failed: %s, falling back to rules", exc)
             return self._generate_fix_with_rules(
                 tool_name, current_description, current_params, reports, primary_type,
-                tool_knowledge=tool_knowledge,
+                tool_knowledge=tool_knowledge, evidence=evidence,
             )
+
+    @staticmethod
+    def _format_evidence(evidence: dict[str, Any] | None) -> str:
+        """格式化回归现场信息 (版本历史 / 最近提交) 供修复 prompt 使用"""
+        if not evidence:
+            return ""
+
+        lines: list[str] = []
+        history = evidence.get("version_history") or []
+        if history:
+            lines.append("### 版本历史 (最近提交)")
+            for item in history:
+                lines.append(
+                    f"  - v{item.get('version', '?')} "
+                    f"parent={item.get('parent_version_id') or '-'} "
+                    f"{(item.get('changelog') or '')[:120]}"
+                )
+        commits = evidence.get("git_commits") or []
+        if commits:
+            lines.append("### 代码库最近提交")
+            lines.extend(f"  - {c[:140]}" for c in commits)
+
+        if not lines:
+            return ""
+        return "\n## 现场信息与历史提交\n" + "\n".join(lines) + "\n"
 
     @staticmethod
     def _generate_fix_with_rules(
@@ -162,11 +191,15 @@ class FixStrategiesMixin:
         reports: list[ToolIssueReport],
         primary_type: ToolIssueType,
         tool_knowledge: Any | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, str], str]:
         """基于规则的修复方案（LLM 不可用时的退路）
 
         tool_knowledge 非空时，将全局记忆中的已知未解决问题一并
         附加到描述修正中，保证规则路径也能利用历史经验。
+        evidence 仅用于保证规则路径同样"先看现场"：历史提交由
+        调用方写入新版本 changelog（不写入描述，避免版本号变化
+        造成非实质性描述变更）。
         """
         # 收集所有错误信息
         all_errors = [r.error_message for r in reports]
@@ -233,8 +266,17 @@ class FixStrategiesMixin:
                     + "\n".join(f"  - {issue[:120]}" for issue in extra_issues)
                 )
 
+        # 回归闭环：历史提交作为版本变更依据，由调用方写入 changelog；
+        # 描述中不插入版本号引用 (每次修复都会变，会造成假修复与重试失效)
+
         new_description = current_description
         if suffix_parts:
-            new_description = current_description + "\n".join(suffix_parts)
+            # 去重: 同一问题重复汇报时不重复追加相同修正 (避免假修复)
+            fresh = [
+                p for p in suffix_parts
+                if p.strip() and p.strip() not in current_description
+            ]
+            if fresh:
+                new_description = current_description + "\n".join(fresh)
 
         return new_description, param_updates, code_suggestion

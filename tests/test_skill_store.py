@@ -72,7 +72,7 @@ class TestSkillStoreBasics:
         skill_id = await store.upsert_skill(_entry(
             "邮件汇报", "每日汇总数据并发送邮件", bound="send_email",
         ))
-        assert skill_id == "邮件汇报@0.0.1"
+        assert skill_id == "邮件汇报@1.0.0"  # 外部技能默认首个正式版
 
         entry = await store.get_skill("邮件汇报")
         assert entry is not None
@@ -103,11 +103,11 @@ class TestSkillStoreBasics:
         store = SkillStore(db_path=":memory:")
         await store.initialize()
         await store.upsert_skill(_entry("s1", "描述一"))
-        await store.upsert_skill(_entry("s1", "描述二", version="0.0.2"))
+        await store.upsert_skill(_entry("s1", "描述二", version="1.0.1"))
 
         latest = await store.get_skill("s1")
-        assert latest.version == "0.0.2"
-        specific = await store.get_skill("s1", version="0.0.1")
+        assert latest.version == "1.0.1"
+        specific = await store.get_skill("s1", version="1.0.0")
         assert specific.describe == "描述一"
         assert await store.get_skill("s1", version="9.9.9") is None
         await store.close()
@@ -118,12 +118,12 @@ class TestSkillStoreBasics:
         await store.initialize()
         await store.upsert_skill(_entry("s1", "v1"))
         await store.upsert_skill(
-            _entry("s1", "v2", version="0.0.2", parent_version_id="s1@0.0.1"),
+            _entry("s1", "v2", version="1.0.1", parent_version_id="s1@1.0.0"),
         )
 
         chain = await store.get_version_chain("s1")
-        assert [c.version for c in chain] == ["0.0.2", "0.0.1"]
-        assert chain[0].parent_version_id == "s1@0.0.1"
+        assert [c.version for c in chain] == ["1.0.1", "1.0.0"]
+        assert chain[0].parent_version_id == "s1@1.0.0"
         assert chain[1].parent_version_id is None
         assert await store.get_version_chain("ghost") == []
         await store.close()

@@ -53,6 +53,9 @@ class ToolEntry(BaseModel):
         required_permissions: 调用所需权限 (与 definition 同步)
         lineage_id: 版本链标识 (同一名工具的全部版本共享, 默认 = tool_name)
         summary_l2: 摘要的摘要 (L2 薄层初筛索引文本, ≤30 字; 空 = 未生成)
+        origin: 工具来源 external (外部接入, 默认 1.0.0) /
+            generated (系统自生成, 默认 0.0.1 候选), 见 youmi.core.versioning
+        stage: 版本阶段 candidate (候选库 0.x.y) / stable (正式库 >=1.0.0)
     """
 
     tool_name: str = Field(description="工具名称 (唯一标识)")
@@ -82,6 +85,14 @@ class ToolEntry(BaseModel):
     summary_l2: str = Field(
         default="",
         description="摘要的摘要 (L2 薄层初筛索引文本, 空 = 未生成)",
+    )
+    origin: str = Field(
+        default="generated",
+        description="工具来源 external / generated (决定初始版本号)",
+    )
+    stage: str = Field(
+        default="candidate",
+        description="版本阶段 candidate (候选库) / stable (正式库)",
     )
 
     model_config = {"arbitrary_types_allowed": True}

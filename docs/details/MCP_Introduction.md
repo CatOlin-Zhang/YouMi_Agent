@@ -27,7 +27,7 @@ MCP 层是 YouMi Agent 的统一工具调用网关，采用 **Provider → Serve
 
 ### ToolProvider / LocalFunctionProvider（youmi/mcp/provider.py）
 
-`ToolProvider` 是插件化扩展点：实现 `provider_id()`、`get_tools()` 返回工具定义列表、`execute()` 执行工具调用。`LocalFunctionProvider` 将带标注的 Python 函数自动包装为 MCP 工具，是最常用的方式（`Agent.connect_mcp()` 内部使用）。
+`ToolProvider` 是插件化扩展点：实现 `provider_id()`、`get_tools()` 返回工具定义列表、`execute()` 执行工具调用。`origin` 属性声明工具来源（默认 `generated`，外部接入实现返回 `external`）。`LocalFunctionProvider` 将带标注的 Python 函数自动包装为 MCP 工具，是最常用的方式（`Agent.connect_mcp()` 内部使用；可传 `origin="external"` 声明外部来源）。
 
 ### ToolBridge（youmi/mcp/bridge.py，约 760 行）
 
@@ -82,8 +82,8 @@ COLD  — 长期未用，从活跃列表淘汰
 
 | 方法 | 说明 |
 |------|------|
-| `add_tool(entry)` | 注册工具（同步写入 ToolStore 持久层） |
-| `add_tools_from_provider(provider)` | 批量从 Provider 导入 |
+| `add_tool(entry)` | 注册工具（按来源解析初始版本：外部 1.0.0 / 自生成 0.0.1；同步写入 ToolStore 持久层） |
+| `add_tools_from_provider(provider, essential_names=None, origin=None)` | 批量从 Provider 导入（默认取 `provider.origin`，逐工具落库） |
 | `search(query, top_k)` | 向量语义搜索（有 EmbeddingClient）或关键词降级 |
 | `load_tool(name)` | WARM/COLD → HOT 提升（从 ToolStore 加载） |
 | `recycle(idle_threshold)` | 将超过 idle_threshold 轮未用工具 → COLD |
@@ -99,31 +99,78 @@ COLD  — 长期未用，从活跃列表淘汰
 基于 SQLite + sqlite-vec 扩展的持久化存储层，维护 6 张表：
 
 ```
-tools            — 工具主记录（name/description/parameters/version/parent_version_id）
+tools            — 工具主记录（name/description/parameters/version/parent_version_id/origin/stage）
 vec_tools        — 向量索引（description 的 embedding，用于语义搜索）
-tool_changelogs  — 同版本内变更日志（bug 修复说明）
+tool_changelogs  — 同版本内变更日志（bug 修复说明 / 晋升依据）
 tool_aliases     — 工具别名（alias_name → tool_name + version）
 tool_tags        — 工具标签（多对多）
 tool_dependencies— 工具依赖关系
 ```
 
-关键能力：
+### 4.1 版本号规则（单一规则源 `youmi/core/versioning.py`）
+
+版本号格式 `MAJOR.MINOR.PATCH`（主版本号.次版本号.修订号）：
+
+| 位 | 何时提升 | `ChangeKind` |
+|----|----------|--------------|
+| 主版本号 MAJOR | 添加了**不兼容下层**的修改 | `breaking` |
+| 次版本号 MINOR | 添加**兼容下层**的功能 | `feature` |
+| 修订号 PATCH | **仅修复 bug**，不涉及功能变化 | `fix` |
+
+`ToolStore.create_version(..., change_kind=...)` 优先按变更类型提升；未传时退回 `bump="patch|minor|major"`。候选阶段（0.x）的破坏性变更只提升次版本号（0.(y+1).0），避免绕过晋升直接出现 1.x。
+
+### 4.2 来源（origin）与初始版本
+
+| 来源 | 取值 | 初始版本 | 说明 |
+|------|------|----------|------|
+| 外部接入 | `external` | **1.0.0** | 外部 MCP Server / 外部 Skill 及其携带的工具；首版即正式版 |
+| 系统自生成 | `generated` | **0.0.1** | 内置工具 / Agent 自生成工具；先进入候选库 |
+
+来源在 `Provider → Vault → ToolStore` 全链贯通：`ToolProvider.origin`（默认 `generated`，`LocalFunctionProvider(origin="external")` 可声明）、`ToolVault.add_tool / add_tools_from_provider(origin=...)`（按来源解析初始版本并逐工具落库）、`SkillIngestor.ingest(origin=...)`（默认 `external`，外部技能默认 1.0.0，并对其 `bound_tool_name` 调用 `mark_external` 联动转正式版）。工具文档显式声明了合法 semver 时以声明为准。
+
+### 4.3 阶段（stage）与晋升
+
+阶段由主版本号推导：`0.x.y → candidate`（候选库），`>= 1.0.0 → stable`（正式库）。
+
+- `promote_to_stable(name, evidence)`：候选 head 以 **1.0.0** 进入正式库，`parent` 指向原 head，`diff_patch` 记录差异，`changelog` 写 `change_type='promote'` 与晋升依据；幂等，已是正式版返回 `None`。
+- `mark_external(name)`：将该工具所有版本行 `origin → external`；head 仍为 0.x 时自动晋升 1.0.0，已是正式版仅改标记。
+- `PostTaskPipeline.update_tool_versions()`：统计任务内工具调用，**零失败**且连续成功累计 `PROMOTION_MIN_SUCCESSES`（默认 3）次后，先过**自动测试门禁**（`tool_verifier`，缺省执行定义结构校验），通过才自动 `promote_to_stable`；出现失败即清零重新计数。
+
+### 4.4 回归 bug 修复闭环
+
+测试或后续使用中发现回归 bug 时（`ToolGuardianAgent`）：
+
+```
+收集现场信息（汇报 Agent / 错误消息 / 调用参数 / 当前定义快照）
++ 历史提交（ToolStore 版本链最近 5 条 + git log 最近 5 条）
+        ↓ 注入 FixStrategies（LLM 提示或规则引擎）
+自动修改 → 判定是否产生实质变更
+        ├─ 有变更 → create_version(change_kind="fix") 提交修订版本
+        └─ 无变更 → 重新入队重试（最多 AUTO_FIX_MAX_ATTEMPTS=3 次）
+                    ↓ 超限
+              转人工（ApprovalManager 提交审批，附现场信息与尝试次数）
+```
+
+### 4.5 关键能力
 
 | 方法 | 说明 |
 |------|------|
-| `upsert_tool(entry)` | 插入或更新工具（新版本插入即更新 vec_tools） |
-| `create_version(name, new_version, change)` | 创建新版本，记录 parent_version_id |
-| `get_version_chain(name)` | 获取完整版本历史链 |
-| `get_root_version(name)` / `get_head_version(name)` | 版本链根版本（首次提交）/ 最新版本（供 CallPathRouter 分流） |
+| `upsert_tool(entry)` | 插入或更新工具（按来源解析初始版本；新版本插入即更新 vec_tools） |
+| `create_version(name, definition, changelog, bump, branch, change_kind)` | 按变更类型提升版本号，记录 parent_version_id 与 diff_patch |
+| `promote_to_stable(name, evidence)` | 候选库 → 正式库 **1.0.0**（晋升唯一入口之一） |
+| `mark_external(name)` | 标记外部接入并联动转正式版 1.0.0 |
+| `get_version_chain(name)` | 获取完整版本历史链（main 线性视图） |
+| `get_version_tree(lineage_id)` | 版本树（按 branch 分组，含 is_head/diff_patch） |
+| `get_root_version(name)` / `get_head_version(name)` | 版本链根版本（首次提交）/ 主分支 head（供 CallPathRouter 分流） |
+| `list_tools(stage=..., origin=...)` | 按阶段（候选库/正式库）与来源过滤 head 版本 |
 | `add_changelog(name, change)` | 追加同版本变更日志 |
 | `search(query, top_k)` | 向量语义或关键词搜索 |
 | `search_cone(query, top_k, min_score, tags, risk_ceiling, exclude, exclude_lineages)` | **锥形联合检索**：语义方向 ∩ tag 边界 ∩ 风险边界 ∩ 排除集，一条 SQL 内完成裁剪 |
 | `add_alias / resolve_alias` | 别名管理 |
 | `add_tag / search_by_tags` | 标签管理 |
+| `stats()` | 统计（含 `by_origin` / `by_stage`） |
 
-同名工具的全部版本共享同一条版本链（`lineage_id` 默认 = 工具名），锥形检索支持按版本链去重（exclude_lineages）。
-
-`PostTaskPipeline` 累计失败超阈值时调用 `trigger_tool_version_update()` → 自动调用 `ToolStore.create_version()` 写入修复版本。
+同名工具的全部版本共享同一条版本链（`lineage_id` 默认 = 工具名），锥形检索支持按版本链去重（exclude_lineages）。head 语义统一为「`branch='main'` 且 `is_head=1`」；低版本 `upsert_tool` 不会篡夺 head。
 
 ---
 
@@ -196,17 +243,20 @@ search_and_confirm(query)
 
 ```
 1. 用户/管理员                    向 MCPServer.register_provider() 注册 ToolProvider
-                                   ↓
+                                   ↓ 来源标记 origin (external / generated)
 2. MCPService.setup()              自动导入到 ToolVault（add_tools_from_provider）
-   (GUI 启动时)                    ↓ 异步向量化 + 存入 ToolStore
-                                   ↓
+   (GUI 启动时)                    ↓ 按来源定初始版本（外部 1.0.0 / 自生成 0.0.1）
+                                   ↓ 逐工具 upsert_tool 落库 + 异步向量化
 3. Agent 运行中                    search_new_tools(query) 触发 ToolVault.search()
    工具不足                        → 返回候选 → Agent 选择 → load_tool() → HOT
                                    ↓
 4. ToolBridge.call_tool()          白名单校验 → MCPClient.call → Provider.execute
                                    ↓
-5. 失败累计                        PostTaskPipeline 沉淀经验 → 触发 trigger_tool_version_update
-                                   ↓ ToolStore 写新版本 + GlobalMemory BUG_FIX 记录
+5. 成功调用累计                    PostTaskPipeline.update_tool_versions()
+   (零失败, 达阈值)                ↓ ToolStore.promote_to_stable → 0.0.1 … → 1.0.0
+6. 回归 bug                        ToolGuardian 收集现场/历史 → 自动修复
+                                   ├─ 有变更 → create_version(fix) 修订版本
+                                   └─ 无效 → 重试 ≤3 次 → 仍无效转人工审批
 ```
 
 ---
@@ -236,7 +286,7 @@ GUI 启动时 `EngineBridge.init()` 创建 `MCPService`，一站式初始化：
 | `AuditGate` | `audit_gate.py` | **召回审计闸门**：召回命中后、加载 schema 前拦截；权限不满足（required ⊄ granted）→ BLOCK；风险超阈值（默认 high）→ MANUAL（自动入 ApprovalManager 待审队列）；三态均写 `tool.recall_audit` 审计事件 |
 | `CallPathRouter` | `version_router.py` | **调用版本路由**：按调用来源分流 — SKILL 来源 → root 版本（有 Skill 绑定时）；CROSS_DOMAIN / DIRECT → head 最新版本 |
 | `SkillStore` | `skill_store.py` | **SOP Skill 并行库**（SQLite + sqlite-vec，结构镜像 ToolStore）：SkillEntry 含 L0 describe 原文 / L1 摘要（≤80 字）/ L2 摘要的摘要（≤30 字）与 bound_tool_name 绑定；L1/L2 双层向量索引（L2 无命中自动回退 L1）；search_cone 锥形检索 |
-| `SkillIngestor` | `skill_ingest.py` | **Skill 文档入库器**：宽容解析 Markdown（frontmatter / 首行 key: value / 标题兜底）→ 生成 L1/L2 摘要 → 绑定 Tool → 入库 |
+| `SkillIngestor` | `skill_ingest.py` | **Skill 文档入库器**：宽容解析 Markdown（frontmatter / 首行 key: value / 标题兜底）→ 按来源定版本（外部默认 1.0.0）→ 生成 L1/L2 摘要 → 绑定 Tool 并联动 `mark_external` → 入库 |
 | `SummaryGenerator` | `summary.py` | **三级摘要生成器**：默认启发式截断；注入 LLM 时生成式摘要（失败回退启发式） |
 
 共享向量工具（`youmi/_vec_utils.py`）：sqlite-vec 扩展加载（`try_load_sqlite_vec`）、向量归一化、L2/余弦互转、纯 Python 余弦降级，供 ToolStore / GlobalMemory / PlanMemory / SkillStore 复用。

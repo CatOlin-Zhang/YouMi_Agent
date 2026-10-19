@@ -497,8 +497,12 @@ class TestGuardianIntegration:
                 metadata={"report_type": "tool_issue"},
             ))
 
-            # 等待监听循环消费 → 自动修复 → 写回全局记忆
+            # 等待监听循环消费 → 自动修复 → 写回全局记忆 → 前端广播
+            # BUG_FIX 写入 / 历史条目 resolved / guardian_fix 广播分步完成,
+            # 以最终广播事件为完成信号再断言 (避免轮询到中间状态)
             bug_fixes: list = []
+            unresolved: list = []
+            fix_events: list = []
             for _ in range(50):
                 await asyncio.sleep(0.1)
                 entries = await bridge.global_memory.list_entries(
@@ -508,24 +512,22 @@ class TestGuardianIntegration:
                     e for e in entries
                     if e.category == KnowledgeCategory.BUG_FIX
                 ]
-                if bug_fixes:
+                unresolved = [e for e in entries if not e.resolved]
+                fix_events = [
+                    e for e in hub.events
+                    if e["type"] == "agent_message"
+                    and e.get("metadata", {}).get("report_type") == "guardian_fix"
+                ]
+                if bug_fixes and not unresolved and fix_events:
                     break
 
             # 闭环断言：BUG_FIX 经验写入且已标记 resolved
             assert bug_fixes, "guardian 未写回 BUG_FIX 经验"
             assert all(e.resolved for e in bug_fixes)
             # 历史未解决条目被标记 resolved
-            unresolved = await bridge.global_memory.list_entries(
-                tool_name="get_weather", unresolved_only=True,
-            )
             assert unresolved == []
 
             # 前端收到 guardian_fix 广播（agent_message 事件）
-            fix_events = [
-                e for e in hub.events
-                if e["type"] == "agent_message"
-                and e.get("metadata", {}).get("report_type") == "guardian_fix"
-            ]
             assert fix_events, "未收到 guardian_fix 前端广播"
             assert "get_weather" in fix_events[0]["content"]
 

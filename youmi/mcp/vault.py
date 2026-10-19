@@ -51,6 +51,11 @@ import logging
 from typing import Any
 
 from youmi.core.tool import ToolDefinition
+from youmi.core.versioning import (
+    normalize_origin,
+    resolve_initial_version,
+    stage_of,
+)
 from youmi.mcp.models import ToolContextTier, ToolEntry, ToolSearchResult
 
 logger = logging.getLogger(__name__)
@@ -104,6 +109,10 @@ class ToolVault:
     async def add_tool(self, entry: ToolEntry) -> None:
         """添加工具到 Vault
 
+        版本规则 (见 youmi.core.versioning):
+        - 外部接入 (origin=external) 未声明版本 → 1.0.0 正式版
+        - 系统自生成 (origin=generated) 未声明版本 → 0.0.1 候选版
+
         如果 embedding_client 可用且条目无向量，自动生成 embedding。
         如果启用了 ToolStore，同步写入持久化层。
 
@@ -116,11 +125,17 @@ class ToolVault:
                 "summary": entry.definition.description[:80],
             })
 
-        # 同步版本号到 ToolDefinition
-        if entry.version and entry.version != entry.definition.version:
-            entry = entry.model_copy(update={
-                "definition": entry.definition.model_copy(update={"version": entry.version}),
-            })
+        # 版本号: 按来源解析 (外部 1.0.0 / 自生成 0.0.1), 同步到 ToolDefinition
+        origin = normalize_origin(getattr(entry, 'origin', None))
+        version = resolve_initial_version(
+            entry.version or entry.definition.version, origin,
+        )
+        entry = entry.model_copy(update={
+            "version": version,
+            "origin": origin,
+            "stage": stage_of(version),
+            "definition": entry.definition.model_copy(update={"version": version}),
+        })
 
         # 同步锥形元数据 (definition 为权威源; lineage_id 默认 = tool_name)
         # 保证内存搜索路径返回的 ToolSearchResult 携带风险位/权限位/lineage
@@ -158,27 +173,45 @@ class ToolVault:
         self,
         provider: Any,
         essential_names: set[str] | None = None,
+        origin: str | None = None,
     ) -> None:
         """从 Provider 批量导入工具
+
+        来源决定初始版本号: external (外部 MCP Server / 外部 Skill
+        携带工具) → 1.0.0 正式版; generated (内置/Agent 自生成)
+        → 0.0.1 候选版。启用持久化层时同步落库。
 
         Args:
             provider: ToolProvider 实例 (需有 _definitions 和 _handlers)
             essential_names: 必备工具名称集合 (None = 全部必备)
+            origin: 显式指定来源; None = 读 provider.origin (默认 generated)
         """
         essential = essential_names or set()
         definitions = getattr(provider, "_definitions", {})
         handlers = getattr(provider, "_handlers", {})
         provider_id = getattr(provider, "provider_id", "")
+        provider_origin = normalize_origin(
+            origin if origin is not None
+            else getattr(provider, "origin", None)
+        )
 
         for name, defn in definitions.items():
+            version = resolve_initial_version(defn.version, provider_origin)
+            entry_defn = (
+                defn if version == defn.version
+                else defn.model_copy(update={"version": version})
+            )
             entry = ToolEntry(
                 tool_name=name,
-                definition=defn,
+                definition=entry_defn,
                 handler=handlers.get(name),
                 provider_id=provider_id,
                 essential=(name in essential) if essential_names is not None else True,
                 summary=defn.description[:80],
                 tier=ToolContextTier.HOT if (name in essential or essential_names is None) else ToolContextTier.COLD,
+                version=version,
+                origin=provider_origin,
+                stage=stage_of(version),
             )
             self._entries[name] = entry
 
@@ -186,8 +219,23 @@ class ToolVault:
         if self._embedding_client:
             await self.build_embeddings()
 
-        logger.info("Vault: imported %d tools from provider '%s'",
-                     len(definitions), provider_id)
+        # 同步落库 (工具库持久化: 版本链可追溯)
+        if self._store is not None:
+            for name in definitions:
+                entry = self._entries.get(name)
+                if entry is None:
+                    continue
+                try:
+                    await self._store.upsert_tool(entry)
+                except Exception as exc:
+                    logger.warning(
+                        "Vault: failed to persist '%s' to store: %s", name, exc,
+                    )
+
+        logger.info(
+            "Vault: imported %d tools from provider '%s' (origin=%s)",
+            len(definitions), provider_id, provider_origin,
+        )
 
     # ==================================================================
     # 搜索

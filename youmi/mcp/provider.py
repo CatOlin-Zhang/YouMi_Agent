@@ -44,6 +44,15 @@ class ToolProvider(ABC):
         """提供者唯一标识"""
         ...
 
+    @property
+    def origin(self) -> str:
+        """工具来源 — external (外部接入, 默认 1.0.0) / generated
+
+        外部 MCP Server / 外部 Skill 携带工具的 Provider 应覆盖为
+        "external"; 内置与 Agent 自生成工具保持 "generated" (0.0.1 候选)。
+        """
+        return "generated"
+
     @abstractmethod
     async def get_tools(self) -> list[MCPToolInfo]:
         """返回该 Provider 提供的所有工具信息"""
@@ -101,14 +110,20 @@ class LocalFunctionProvider(ToolProvider):
         result = await provider.execute("get_weather", {"city": "北京"}, ctx)
     """
 
-    def __init__(self, provider_id: str = "local") -> None:
+    def __init__(self, provider_id: str = "local", origin: str = "generated") -> None:
         self._provider_id = provider_id
+        self._origin = origin
         self._definitions: dict[str, ToolDefinition] = {}
         self._handlers: dict[str, ToolHandler] = {}
 
     @property
     def provider_id(self) -> str:
         return self._provider_id
+
+    @property
+    def origin(self) -> str:
+        """工具来源 (external → 初始 1.0.0 / generated → 0.0.1)"""
+        return self._origin
 
     @property
     def tool_names(self) -> list[str]:

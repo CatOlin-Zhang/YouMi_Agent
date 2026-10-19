@@ -68,10 +68,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class SkillEntry(BaseModel):
-    """Skill 条目 — SOP 流程知识 (镜像 ToolEntry, 含 Tool 绑定)"""
+    """Skill 条目 — SOP 流程知识 (镜像 ToolEntry, 含 Tool 绑定)
+
+    版本规则: 外部接入的技能默认 1.0.0 (正式版首个版本号),
+    见 youmi.core.versioning。
+    """
 
     skill_name: str
-    version: str = "0.0.1"
+    version: str = "1.0.0"
     parent_version_id: str | None = None
     # 绑定的 Tool 原始名称 (lineage root 提交语义; 空 = 未绑定)
     bound_tool_name: str = ""
@@ -111,7 +115,7 @@ CREATE TABLE IF NOT EXISTS skills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     skill_id TEXT UNIQUE NOT NULL,
     skill_name TEXT NOT NULL,
-    version TEXT NOT NULL DEFAULT '0.0.1',
+    version TEXT NOT NULL DEFAULT '1.0.0',
     parent_version_id TEXT,
     bound_tool_name TEXT DEFAULT '',
     describe TEXT DEFAULT '',

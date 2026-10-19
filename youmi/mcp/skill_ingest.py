@@ -40,6 +40,12 @@ import re
 from typing import Any
 
 from youmi.core.tool import RiskLevel
+from youmi.core.versioning import (
+    STABLE_INITIAL_VERSION,
+    ToolOrigin,
+    normalize_origin,
+    resolve_initial_version,
+)
 from youmi.mcp.skill_store import SkillEntry, SkillStore
 from youmi.mcp.summary import SummaryGenerator
 
@@ -59,6 +65,7 @@ _KEY_ALIASES = {
     "skill_name": ("skill_name", "skill", "name", "title"),
     "describe": ("describe", "description", "summary"),
     "bound_tool_name": ("bound_tool", "tool", "tools"),
+    "version": ("version", "ver"),
     "tags": ("tags",),
     "risk_level": ("risk", "risk_level"),
     "content": ("content", "body", "steps"),
@@ -170,6 +177,7 @@ def _from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
     skill_name = _pick("skill_name")
     describe = _pick("describe")
     bound_tool = _pick("bound_tool_name")
+    version = _pick("version")
     tags = _pick("tags")
     risk = _pick("risk_level")
     content = _pick("content")
@@ -192,6 +200,7 @@ def _from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
         "skill_name": str(skill_name or "").strip(),
         "describe": str(describe or "").strip(),
         "bound_tool_name": str(bound_tool or "").strip(),
+        "version": str(version or "").strip(),
         "tags": [str(t) for t in tags],
         "risk_level": risk,
         "content": str(content or ""),
@@ -201,32 +210,50 @@ def _from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
 class SkillIngestor:
     """SOP Skill 文档入库器 — describe → L1/L2 → 绑定 → SkillStore
 
+    版本规则 (见 youmi.core.versioning): 外部接入的技能默认 1.0.0
+    (正式版首个版本号); 文档显式声明合法版本时以声明为准。
+    绑定的工具同步标记为外部来源并转正式版 (mark_external)。
+
     Args:
         skill_store: SkillStore 并行库实例
         summary_generator: 三级摘要生成器 (默认启发式截断;
             注入 LLM 时生成式摘要, 见 youmi/mcp/summary.py)
+        tool_store: ToolStore 实例 (可选) — 用于将技能携带的工具
+            标记为外部接入并晋升 1.0.0
     """
 
     def __init__(
         self,
         skill_store: SkillStore,
         summary_generator: SummaryGenerator | None = None,
+        tool_store: Any | None = None,
     ) -> None:
         self._store = skill_store
         self._gen = summary_generator or SummaryGenerator()
+        self._tool_store = tool_store
 
     @property
     def skill_store(self) -> SkillStore:
         return self._store
 
-    async def ingest(self, skill_doc: str | dict[str, Any]) -> SkillEntry:
+    @property
+    def tool_store(self) -> Any | None:
+        return self._tool_store
+
+    async def ingest(
+        self,
+        skill_doc: str | dict[str, Any],
+        origin: str = ToolOrigin.EXTERNAL.value,
+    ) -> SkillEntry:
         """解析并入库一份 skill 文档
 
-        流程: 宽容解析文件头 describe → 生成 L1 摘要与 L2 摘要的摘要
-        → 绑定 bound_tool_name (仅引用, 不创建 Tool) → upsert 入并行库。
+        流程: 宽容解析文件头 describe → 按来源解析版本 (外部默认
+        1.0.0) → 生成 L1 摘要与 L2 摘要的摘要 → 绑定 bound_tool_name
+        (仅引用, 不创建 Tool; 有 ToolStore 时联动转正式版) → upsert。
 
         Args:
             skill_doc: Markdown 文本 (含/不含 frontmatter) 或显式字段 dict
+            origin: 技能来源 (默认 external → 1.0.0)
 
         Returns:
             入库后的 SkillEntry (含生成的 L1/L2 与绑定关系)
@@ -234,6 +261,8 @@ class SkillIngestor:
         parsed = parse_skill_doc(skill_doc)
         name = parsed["skill_name"]
         describe = parsed["describe"]
+        origin_value = normalize_origin(origin)
+        version = resolve_initial_version(parsed.get("version"), origin_value)
 
         # L1/L2 摘要: 默认截断自 describe; 注入 LLM 时生成式
         summary_l1 = await self._gen.generate_l1(name, describe)
@@ -241,6 +270,7 @@ class SkillIngestor:
 
         entry = SkillEntry(
             skill_name=name,
+            version=version or STABLE_INITIAL_VERSION,
             describe=describe,
             summary=summary_l1,
             summary_l2=summary_l2,
@@ -250,9 +280,25 @@ class SkillIngestor:
             risk_level=parsed["risk_level"],
         )
         await self._store.upsert_skill(entry)
+
+        # 联动: 外部技能携带的工具 → 外部来源 + 正式版 1.0.0
+        # (自生成技能不改变其绑定工具的来源与版本)
+        if (
+            self._tool_store is not None
+            and entry.bound_tool_name
+            and origin_value == ToolOrigin.EXTERNAL.value
+        ):
+            try:
+                await self._tool_store.mark_external(entry.bound_tool_name)
+            except Exception as exc:
+                logger.warning(
+                    "SkillIngestor: mark_external('%s') failed: %s",
+                    entry.bound_tool_name, exc,
+                )
+
         logger.info(
-            "SkillIngestor: ingested '%s' (bound_tool=%s)",
-            name, entry.bound_tool_name or "<none>",
+            "SkillIngestor: ingested '%s'@%s (bound_tool=%s)",
+            name, entry.version, entry.bound_tool_name or "<none>",
         )
         return entry
 
