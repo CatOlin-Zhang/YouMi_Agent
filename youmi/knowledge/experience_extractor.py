@@ -23,8 +23,7 @@ import json
 import logging
 from typing import Any, Callable, Awaitable
 
-from youmi.knowledge.models import KnowledgeCategory
-from youmi.coordinator.post_task import ToolExperience
+from youmi.knowledge.models import KnowledgeCategory, ToolExperience
 
 logger = logging.getLogger(__name__)
 

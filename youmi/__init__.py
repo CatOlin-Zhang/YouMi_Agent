@@ -1,247 +1,93 @@
-"""YouMi Agent — 多Agent协作框架"""
+"""YouMi Agent — DSH 的能力 sidecar
 
-from youmi.core.agent import Agent, AgentConfig, AgentStatus
-from youmi.core.tool import ToolDefinition, ToolRegistry, ToolVersion, bump_version
-from youmi.llm.client import LLMClient, LLMResponse
-from youmi.memory.memory import MemoryManager
-from youmi.memory.strategies.base import MemoryStrategy
-from youmi.mcp import (
-    MCPServer,
-    MCPClient,
-    ToolBridge,
-    ToolProvider,
-    LocalFunctionProvider,
-    ToolIssueType,
-    ToolIssueReport,
-    ToolVault,
-    ToolEntry,
-    ToolContextTier,
-    ToolSearchResult,
-    ToolStore,
-    AgentToolContext,
-    ApprovalManager,
-    ApprovalLevel,
-    ApprovalDecision,
-    ApprovalRecord,
+master 分支保留完整的多 Agent 框架；dsh-shell 分支只保留
+DSH 缺失的四类能力，通过 MCP (stdio) 暴露给 DSH 宿主：
+
+- 工具目录检索（ToolStore / ToolVault / ConeRetriever）
+- Skill 索引（SkillStore / SkillIngest）
+- 计划复用（PlanMemory）
+- 失败经验（GlobalMemory / ToolExperienceExtractor）
+
+宿主职责（agent loop、session log、工具执行、subagent、approval、
+sandbox、UI）全部由 DSH 承担，不在本包内。
+"""
+
+from youmi.core.tool import (
+    RiskLevel,
+    ToolDefinition,
+    ToolParameter,
+    ToolRegistry,
+    ToolVersion,
+    bump_version,
+    risk_rank,
 )
-from youmi.coordinator.master import MasterAgent
-from youmi.coordinator.tool_guardian import ToolGuardianAgent, ToolModification
-from youmi.coordinator.plan import (
-    WorkflowPlan, WorkflowStep, WorkflowExecutor, StepResult, StepStatus,
-)
-from youmi.coordinator.handoff import HandoffProtocol
-from youmi.scheduler import HeartbeatScheduler, ScheduledTask
-from youmi.bus import (
-    WorkflowMessage,
-    WorkflowMessageType,
-    BusEnvelope,
-    MessageBroker,
-    InProcessBroker,
-    BusServer,
-    BusClient,
-)
-from youmi.tools import BuiltinToolProvider
-from youmi.core.hooks import (
-    HookRegistry, HookType, HookContext, HookDecision, HookDecisionType,
-)
-from youmi.core.plugin import Plugin, PluginManager
-from youmi.core.prompt import PromptAssembler, PromptLayer
-from youmi.llm.embeddings import EmbeddingClient, EmbeddingError
 from youmi.knowledge import (
     GlobalMemory,
     KnowledgeCategory,
     KnowledgeEntry,
-    ToolKnowledge,
+    ToolExperience,
     ToolExperienceExtractor,
+    ToolKnowledge,
 )
-from youmi.core.resilience import (
-    CircuitBreaker,
-    CircuitBreakerConfig,
-    CircuitBreakerRegistry,
-    CircuitOpenError,
-    retry_async,
+from youmi.llm.embeddings import EmbeddingClient, EmbeddingError
+from youmi.mcp import (
+    CallPathRouter,
+    CallPathSource,
+    LocalFunctionProvider,
+    MCPServer,
+    SkillEntry,
+    SkillSearchResult,
+    SkillStore,
+    ToolContextTier,
+    ToolEntry,
+    ToolProvider,
+    ToolSearchResult,
+    ToolStore,
+    ToolVault,
 )
-from youmi.observability import (
-    AuditEvent,
-    AuditLogger,
-    get_audit_logger,
-    get_tracer,
-    record_span_error,
-    set_span_attributes,
-    setup_tracing,
-    shutdown_tracing,
-    span,
-)
-from youmi.security import (
-    AuthManager,
-    AuthRole,
-    AuthToken,
-    Principal,
-    Sandbox,
-    SandboxPolicy,
-    SandboxViolation,
-    configure_auth_manager,
-    configure_sandbox,
-    get_auth_manager,
-    get_sandbox,
-)
-from youmi.gateway import (
-    TaskStatus,
-    TaskRecord,
-    new_task_id,
-    TaskQueue,
-    InMemoryTaskQueue,
-    TaskRegistry,
-    TaskEventHub,
-    task_update_event,
-    TaskExecutor,
-    TaskOutcome,
-    MasterTaskExecutor,
-    WorkerPool,
-    GatewayService,
-)
-from youmi.eval import (
-    EvalDataset,
-    EvalStep,
-    EvalTask,
-    builtin_dataset,
-    EvalRunner,
-    TaskRun,
-    TaskScore,
-    EvalSummary,
-    score_task,
-    summarize,
-)
+from youmi.plan import PlanMemory, StepStatus, WorkflowPlan, WorkflowStep
 
 __all__ = [
-    "Agent",
-    "AgentConfig",
-    "AgentStatus",
+    # 工具定义与版本规则
+    "RiskLevel",
     "ToolDefinition",
+    "ToolParameter",
     "ToolRegistry",
-    "LLMClient",
-    "LLMResponse",
-    "MemoryManager",
-    "MemoryStrategy",
-    # MCP
-    "MCPServer",
-    "MCPClient",
-    "ToolBridge",
-    "ToolProvider",
-    "LocalFunctionProvider",
-    "ToolIssueType",
-    "ToolIssueReport",
-    # Coordinator
-    "MasterAgent",
-    "ToolGuardianAgent",
-    "ToolModification",
-    # P1: WorkflowPlan + Executor
-    "WorkflowPlan",
-    "WorkflowStep",
-    "WorkflowExecutor",
-    "StepResult",
-    "StepStatus",
-    # P1: Handoff
-    "HandoffProtocol",
-    # P1: Scheduler
-    "HeartbeatScheduler",
-    "ScheduledTask",
-    # Message Bus
-    "WorkflowMessage",
-    "WorkflowMessageType",
-    "BusEnvelope",
-    "MessageBroker",
-    "InProcessBroker",
-    "BusServer",
-    "BusClient",
-    # Built-in Tools
-    "BuiltinToolProvider",
-    # P2: Hook / Plugin
-    "HookRegistry",
-    "HookType",
-    "HookContext",
-    "HookDecision",
-    "HookDecisionType",
-    "Plugin",
-    "PluginManager",
-    # P2: Prompt
-    "PromptAssembler",
-    "PromptLayer",
-    # ToolVault (工具发现与向量搜索)
+    "ToolVersion",
+    "bump_version",
+    "risk_rank",
+    # 工具目录
+    "ToolStore",
     "ToolVault",
     "ToolEntry",
     "ToolContextTier",
     "ToolSearchResult",
-    "EmbeddingClient",
-    "EmbeddingError",
-    # Phase 4: 工具生命周期
-    "ToolStore",
-    "AgentToolContext",
-    "ApprovalManager",
-    "ApprovalLevel",
-    "ApprovalDecision",
-    "ApprovalRecord",
-    "ToolVersion",
-    "bump_version",
-    # Phase 6: 全局记忆
+    # Skill 索引
+    "SkillStore",
+    "SkillEntry",
+    "SkillSearchResult",
+    # 版本路由
+    "CallPathRouter",
+    "CallPathSource",
+    # 计划复用
+    "PlanMemory",
+    "WorkflowPlan",
+    "WorkflowStep",
+    "StepStatus",
+    # 失败经验
     "GlobalMemory",
     "KnowledgeCategory",
     "KnowledgeEntry",
     "ToolKnowledge",
+    "ToolExperience",
     "ToolExperienceExtractor",
-    # M1: 可靠性（重试退避 + 熔断器）
-    "CircuitBreaker",
-    "CircuitBreakerConfig",
-    "CircuitBreakerRegistry",
-    "CircuitOpenError",
-    "retry_async",
-    # M1: 可观测性（审计 + OTel 追踪）
-    "AuditEvent",
-    "AuditLogger",
-    "get_audit_logger",
-    "get_tracer",
-    "record_span_error",
-    "set_span_attributes",
-    "setup_tracing",
-    "shutdown_tracing",
-    "span",
-    # M1: 安全（认证 + 沙箱）
-    "AuthManager",
-    "AuthRole",
-    "AuthToken",
-    "Principal",
-    "Sandbox",
-    "SandboxPolicy",
-    "SandboxViolation",
-    "configure_auth_manager",
-    "configure_sandbox",
-    "get_auth_manager",
-    "get_sandbox",
-    # P1: 任务网关（提交 / 查询 / SSE 事件流 / Worker 池）
-    "TaskStatus",
-    "TaskRecord",
-    "new_task_id",
-    "TaskQueue",
-    "InMemoryTaskQueue",
-    "TaskRegistry",
-    "TaskEventHub",
-    "task_update_event",
-    "TaskExecutor",
-    "TaskOutcome",
-    "MasterTaskExecutor",
-    "WorkerPool",
-    "GatewayService",
-    # P1: 质量保障（Eval 基准）
-    "EvalDataset",
-    "EvalStep",
-    "EvalTask",
-    "builtin_dataset",
-    "EvalRunner",
-    "TaskRun",
-    "TaskScore",
-    "EvalSummary",
-    "score_task",
-    "summarize",
+    # Embedding
+    "EmbeddingClient",
+    "EmbeddingError",
+    # MCP 基础
+    "MCPServer",
+    "ToolProvider",
+    "LocalFunctionProvider",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

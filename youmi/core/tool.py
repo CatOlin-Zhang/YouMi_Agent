@@ -34,7 +34,7 @@ import asyncio
 import inspect
 import json
 import logging
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, get_type_hints
 
 from pydantic import BaseModel, Field
 
@@ -179,6 +179,13 @@ class ToolDefinition(BaseModel):
         sig = inspect.signature(func)
         tool_name = name or func.__name__
 
+        # from __future__ import annotations 会把注解变成字符串，
+        # 先解析回真实类型，否则 int/bool 等会全部退化为 string
+        try:
+            type_hints = get_type_hints(func)
+        except Exception:  # 局部引用/无法求值时回退到原始注解
+            type_hints = {}
+
         # 提取描述: 优先使用传入，否则取 docstring 第一行
         if not description:
             doc = inspect.getdoc(func) or ""
@@ -192,7 +199,7 @@ class ToolDefinition(BaseModel):
                 continue
 
             # 类型映射
-            annotation = param.annotation
+            annotation = type_hints.get(param_name, param.annotation)
             py_type = "string"
             if annotation is not inspect.Parameter.empty:
                 py_type = _python_type_to_json(annotation)
@@ -412,6 +419,16 @@ def _python_type_to_json(annotation: Any) -> str:
         list: "array",
         dict: "object",
     }
+    # get_type_hints 求解失败时注解可能仍是字符串
+    if isinstance(annotation, str):
+        return {
+            "str": "string",
+            "int": "integer",
+            "float": "number",
+            "bool": "boolean",
+            "list": "array",
+            "dict": "object",
+        }.get(annotation, "string")
     # 处理 typing 泛型 (list[str] → "array")
     origin = getattr(annotation, "__origin__", None)
     if origin is not None:

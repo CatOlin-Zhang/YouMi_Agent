@@ -346,6 +346,32 @@ class SkillStore:
     # 读取
     # ==================================================================
 
+    async def list_skills(self, limit: int = 20, offset: int = 0) -> list[SkillEntry]:
+        """分页列出 Skill（按更新时间倒序）
+
+        供 sidecar 的 youmi_skill_list 使用。
+
+        Args:
+            limit: 每页数量（调用方负责上限控制）
+            offset: 起始偏移
+
+        Returns:
+            SkillEntry 列表
+        """
+        conn = self._ensure_conn()
+
+        def _list():
+            rows = conn.execute(
+                f"""SELECT {_SKILL_COLUMNS}
+                    FROM skills s
+                    ORDER BY s.updated_at DESC, s.rowid DESC
+                    LIMIT ? OFFSET ?""",
+                (max(1, int(limit)), max(0, int(offset))),
+            ).fetchall()
+            return [self._row_to_entry(r) for r in rows if r]
+
+        return await asyncio.to_thread(_list)
+
     async def get_skill(
         self, skill_name: str, version: str | None = None,
     ) -> SkillEntry | None:

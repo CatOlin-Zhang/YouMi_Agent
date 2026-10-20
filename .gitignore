@@ -17,10 +17,14 @@ venv/
 # IDE
 .idea/
 
-# 运行时产物（本地数据库 / GUI 会话数据 / 误生成的空文件）
+# 运行时产物（本地数据库 / 误生成的空文件）
 .youmi_tools.db
-gui/data/
+.youmi/
 /PATH
 
 # 本地 DSH 源码（浅克隆参考/运行用，不入库；版本见 docs/dsh-shell-migration-plan.md）
 /dsh/
+
+# DSH 插件构建产物
+node_modules/
+dsh-plugins/*/lib/

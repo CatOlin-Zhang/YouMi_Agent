@@ -27,9 +27,25 @@ from typing import Any
 import httpx
 
 from youmi._vec_utils import cosine_similarity_python as _cosine_similarity
-from youmi.llm.client import is_local_base_url
 
 logger = logging.getLogger(__name__)
+
+# 本地地址主机名 — 这些地址的请求必须绕过系统代理环境变量
+_LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+
+
+def is_local_base_url(url: str) -> bool:
+    """判断 base_url 是否指向本机。
+
+    Clash/v2ray 等系统代理软件会把发往 localhost 的请求当作普通流量
+    路由到远程节点，导致 502 Bad Gateway。本地 LLM（Ollama 等）的
+    客户端需以 ``trust_env=False`` 创建，避免继承此类代理环境变量。
+    """
+    try:
+        host = (httpx.URL(url).host or "").lower()
+    except Exception:
+        return False
+    return host in _LOCAL_HOSTNAMES or host.startswith("127.")
 
 
 class EmbeddingClient:

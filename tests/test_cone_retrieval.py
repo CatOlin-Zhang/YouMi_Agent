@@ -5,13 +5,11 @@ ConeRetriever 锥形检索融合层 测试
 1. permissions_satisfied — 权限子集判定纯函数
 2. Store 路径 — SQL 锥形 + Python 层权限裁剪
 3. Vault 路径 — 内存锥形 (风险/lineage/权限过滤)
-4. Bridge 集成 — allowed_tools 白名单升为锥形权限边界
 """
 
 from __future__ import annotations
 
 import math
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -57,15 +55,6 @@ class MockEmbeddingClient:
         if norm > 0:
             vec = [x / norm for x in vec]
         return vec
-
-
-def _mock_client() -> MagicMock:
-    from youmi.mcp.client import MCPClient
-    client = MagicMock(spec=MCPClient)
-    client.list_tools = AsyncMock(return_value=[])
-    client.call_tool = AsyncMock(return_value=MagicMock(is_error=False, text="ok"))
-    client.to_openai_tools = MagicMock(return_value=[])
-    return client
 
 
 def _tool(name, desc, risk="low", perms=None):
@@ -331,82 +320,4 @@ class TestConeRetrieverVault:
         assert results == []
 
 
-# ===================================================================
-# 4. Bridge 集成 — allowed_tools 升为锥形权限边界
-# ===================================================================
 
-class TestBridgeConeIntegration:
-    """ToolBridge 搜索路径走锥形检索"""
-
-    @staticmethod
-    def _make_vault():
-        from youmi.mcp.vault import ToolVault
-        return ToolVault(embedding_client=MockEmbeddingClient())
-
-    @pytest.mark.asyncio
-    async def test_search_new_tools_permission_boundary(self):
-        """受限 Agent: required_permissions 超出白名单的候选不被召回"""
-        from youmi.mcp.bridge import ToolBridge
-
-        vault = self._make_vault()
-        await vault.add_tool(_entry("gated_tool", "受限工具描述", perms=["fs:write"]))
-        await vault.add_tool(_entry("open_tool", "开放工具描述"))
-
-        bridge = ToolBridge(
-            agent_id="agent-1",
-            mcp_client=_mock_client(),
-            allowed_tools=["existing_tool"],  # 白名单不含 fs:write
-            vault=vault,
-            search_meta_tool=True,
-        )
-
-        result = await bridge.call_tool("search_new_tools", {"query": "工具", "top_k": 5})
-        import json
-        payload = json.loads(result.text)
-        names = {c["name"] for c in payload["candidates"]}
-        assert "gated_tool" not in names
-        assert "open_tool" in names
-
-    @pytest.mark.asyncio
-    async def test_search_new_tools_unrestricted(self):
-        """无限制 Agent: 权限边界开放, 全部候选可召回"""
-        from youmi.mcp.bridge import ToolBridge
-
-        vault = self._make_vault()
-        await vault.add_tool(_entry("gated_tool", "受限工具描述", perms=["fs:write"]))
-        await vault.add_tool(_entry("open_tool", "开放工具描述"))
-
-        bridge = ToolBridge(
-            agent_id="agent-2",
-            mcp_client=_mock_client(),
-            allowed_tools=None,  # 无限制
-            vault=vault,
-            search_meta_tool=True,
-        )
-
-        result = await bridge.call_tool("search_new_tools", {"query": "工具", "top_k": 5})
-        import json
-        payload = json.loads(result.text)
-        names = {c["name"] for c in payload["candidates"]}
-        assert names == {"gated_tool", "open_tool"}
-
-    @pytest.mark.asyncio
-    async def test_discover_tools_cone(self):
-        """discover_tools 走锥形检索 (权限边界生效)"""
-        from youmi.mcp.bridge import ToolBridge
-
-        vault = self._make_vault()
-        await vault.add_tool(_entry("gated_tool", "受限工具描述", perms=["net:admin"]))
-        await vault.add_tool(_entry("open_tool", "开放工具描述"))
-
-        bridge = ToolBridge(
-            agent_id="agent-3",
-            mcp_client=_mock_client(),
-            allowed_tools=["base"],
-            vault=vault,
-        )
-
-        results = await bridge.discover_tools("工具", top_k=10, min_score=0.0)
-        names = {r["tool_name"] for r in results}
-        assert "gated_tool" not in names
-        assert "open_tool" in names

@@ -8,6 +8,7 @@
 from youmi.knowledge.models import (
     KnowledgeCategory,
     KnowledgeEntry,
+    ToolExperience,
     ToolKnowledge,
 )
 from youmi.knowledge.global_memory import GlobalMemory
@@ -21,6 +22,7 @@ __all__ = [
     "KnowledgeCategory",
     "KnowledgeEntry",
     "ToolKnowledge",
+    "ToolExperience",
     "ToolExperienceExtractor",
     "LLMCallFn",
 ]

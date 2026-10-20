@@ -104,8 +104,32 @@ class ToolKnowledge(BaseModel):
         )
 
 
+class ToolExperience(BaseModel):
+    """单个工具的使用经验记录
+
+    由 ToolExperienceExtractor 从 Agent 会话中提取，
+    作为 GlobalMemory 沉淀前的中间载体。
+
+    Attributes:
+        tool_name: 工具名称
+        success_patterns: 成功的调用模式描述
+        failure_patterns: 失败的调用模式和错误信息
+        boundary_notes: 发现的边界条件
+        usage_count: 使用次数
+        success_rate: 成功率 (0.0 ~ 1.0)
+    """
+
+    tool_name: str
+    success_patterns: list[str] = Field(default_factory=list)
+    failure_patterns: list[str] = Field(default_factory=list)
+    boundary_notes: list[str] = Field(default_factory=list)
+    usage_count: int = 0
+    success_rate: float = 0.0
+
+
 __all__ = [
     "KnowledgeCategory",
     "KnowledgeEntry",
     "ToolKnowledge",
+    "ToolExperience",
 ]

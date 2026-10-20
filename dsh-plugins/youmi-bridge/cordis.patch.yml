@@ -1,0 +1,35 @@
+# YouMi bridge —— DSH 挂载片段
+#
+# 复制到 DSH profile 的 cordis.patch.yml，或用 `dsh --patch` 加载本文件。
+# 使用前把 <path-to-YouMi_Agent> 替换成本机仓库绝对路径。
+#
+# 整体分两步：
+#   1. mcp-client 以 stdio 子进程拉起 Python sidecar；
+#   2. youmi-bridge 注入「何时使用 youmi_* 工具」的系统提示。
+- insert:
+    - id: mcp-youmi
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        transport: stdio
+        serverName: youmi
+        command: python
+        args:
+          - '-m'
+          - 'youmi.mcp.stdio_server'
+        cwd: '<path-to-YouMi_Agent>'
+        env:
+          YOUMI_DATA_DIR: '<path-to-YouMi_Agent>/.youmi'
+          # 留空 = 关闭向量检索，自动降级为关键词匹配
+          YOUMI_EMBEDDING_BASE_URL: ''
+          YOUMI_EMBEDDING_MODEL: 'nomic-embed-text'
+        toolCallTimeoutMs: 30000
+        # fail-open：sidecar 起不来时不阻断 DSH 主链路
+        failOnStartupError: false
+
+    - id: youmi-bridge
+      name: '@youmi/dsh-bridge'
+      config:
+        # mcp-client 生成的工具名前缀，需与 serverName 对应
+        toolPrefix: 'mcp__youmi__'
+        includeWorkflowGuidance: true
+        extraGuidance: ''

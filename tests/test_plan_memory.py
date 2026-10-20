@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from youmi.coordinator.plan import WorkflowPlan, WorkflowStep
-from youmi.coordinator.plan_memory import PlanMemory
+from youmi.plan.models import WorkflowPlan, WorkflowStep
+from youmi.plan.plan_memory import PlanMemory
 
 
 # ---------------------------------------------------------------------------
