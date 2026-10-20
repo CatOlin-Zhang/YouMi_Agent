@@ -1,177 +1,155 @@
 # YouMi Agent × DeepSeek Harness 迁移计划（dsh-shell 分支）
 
-- 状态：计划定稿，待执行
-- 分支：`dsh-shell`（与远程 `origin/dsh-shell` 对应）
-- 基线：`master` @ `01c82de`（0.0.5），保持原形态冻结
-- 调研基线：`deepseek-ai/deepseek-harness` master（developer preview，2026-10 拉取）
+- 状态：已按 DSH 内 agent 产出的迁移清单重构，P0 待启动
+- 分支：`dsh-shell`（对应远程 `origin/dsh-shell`）；`master` 原形态冻结
+- DSH 源码基线：`dsh/` 浅克隆，`0.2.1-rc.2`，commit `687f282`（2026-10-17），不入库
+- 迁移清单来源：`新建 文本文档 (2).txt`（运行时 → 工具/技能 → 记忆/基础设施 → 不迁移）
 
-## 1. 背景与结论
+## 1. 目标与原则
 
-对比结论：DSH 在宿主能力上更完整，YouMi 在工作流与知识沉淀上更强。因此两种形态不重叠：
+**目标形态**：把 YouMi 的核心特征（工具目录检索、Skill 索引、Plan 复用、失败经验）迁入 DSH，`dsh-shell` 分支实质是**给 DSH 写插件**；YouMi 其余部分一律用 DSH 原生能力替代。
 
-- **DSH 提供宿主**：Cordis 全插件架构（无特权核心），`core/agent-loop`、`core/session`（append-only 日志，model-visible 即可重建）、`core/tools`（`tools/pre-execute → tools/execute → tools/post-execute → tools/result` 治理管线）、`subagent`、`approval`、`sandbox`、Web UI（`dsh web`，默认 127.0.0.1:3080）。
-- **YouMi 提供能力**：工具目录锥形检索（ToolStore / ConeRetriever / ToolVault）、Skill 索引（SkillStore）、计划复用（PlanMemory）、失败经验闭环（GlobalMemory + ExperienceExtractor）。
-- **接入方式**：YouMi 收敛为 Python MCP 能力服务（stdio JSON-RPC），DSH 通过自带 `@deepseek-ai/dsh-mcp-client` 挂载；需要钩子的能力由 `youmi-bridge` TS 薄插件挂在 DSH 文档化扩展点上。
+五条硬性原则：
 
-目标形态一句话：**DSH 是宿主，YouMi 是能力服务；YouMi 不再自建 agent loop、消息总线与 GUI。**
+1. **只迁移 DSH 缺的能力**：工具目录检索、Skill 索引、Plan 复用、失败经验。其余全部丢弃/映射。
+2. **Python 只做 sidecar**：逻辑留在 Python，Node 只做薄适配；不让 Python 重新承担 agent loop / 编排 / GUI。
+3. **fail-open**：sidecar 挂掉或超时不得阻断 DSH 主链路；工具集检索失败降级为全量工具。
+4. **每阶段 A/B**：以 P0 建立的 DSH 基线为对照，证明优化真实有效后才进入下一阶段。
+5. **不建第二套**：不保留第二套 loop、orchestrator、消息协议、审批队列与审计存储。
 
-## 2. 分支与仓库策略
+## 2. 分支与代码策略
 
-| 分支 | 形态 | 规则 |
-|---|---|---|
-| `master` | 原形态：Python 多 Agent 框架 + aiohttp GUI | 冻结：只接受 bug fix 与安全修复，不再新增宿主能力 |
-| `dsh-shell` | DSH 形态：TS 插件 + Python 能力服务 | 承载本次迁移全部工作，对应远程同名分支 |
+| 项 | 规则 |
+|---|---|
+| `master` | 原形态冻结，只接受 bug fix 与安全修复 |
+| `dsh-shell` | DSH 插件形态，承载全部迁移工作 |
+| `dsh/` | DSH 官方源码浅克隆，已加入 `.gitignore`，**不入库**；仅供本地查源码、跑 `pnpm`、对类型 |
+| 插件代码 | 放 `dsh-plugins/<plugin-name>/`，独立 npm 包，ESM，`peerDependencies` 指向 `@deepseek-ai/cordis` 与所需 dsh 包 |
 
-- 两分支共享的"纯 Python 库"层保持无宿主依赖，便于双向 cherry-pick：`youmi/mcp/tool_store.py`、`youmi/mcp/skill_store.py`、`youmi/mcp/cone.py`、`youmi/mcp/vault.py`、`youmi/knowledge/global_memory.py`、`youmi/coordinator/plan_memory.py`。
-- 禁止在 `dsh-shell` 上继续演进 `MasterAgent`、ReAct loop、GUI 引擎层。
-- 迁移不 fork DSH 仓库、不修改其内核；DSH 代码只作为 npm 依赖 / CLI 运行时使用。
+更新 DSH 源码（走本机代理）：
+
+```powershell
+git -C dsh -c http.proxy=http://127.0.0.1:7897 pull --ff-only
+# 或重克隆：git -c http.proxy=http://127.0.0.1:7897 clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git dsh
+```
+
+若后续需要协作者复现同一份源码，将该目录改为 git submodule（仓库只记录指针，不膨胀）。
 
 ## 3. 目标架构
 
 ```text
-┌─────────────────────── DSH 宿主（Node 22+，TypeScript，Cordis）───────────────────────┐
-│  dsh web（127.0.0.1:3080）   Web UI（host/client）                                     │
-│  core/agent-loop   core/session   core/tools   subagent   approval   sandbox          │
-│  mcp-client（serverName=youmi，stdio）                                                 │
-└──────────────────────────────┬────────────────────────────────────────────────────────┘
-                               │ newline-delimited JSON-RPC 2.0（stdio）
-                               ▼
-┌───────────────────── YouMi Capability Server（Python）────────────────────────────────┐
-│  youmi.mcp.stdio_server → MCPServer.handle → ToolProvider 路由                        │
-│  youmi_tool_search / youmi_tool_load        （工具目录检索）                             │
-│  youmi_skill_search / youmi_skill_load      （Skill 索引）                              │
-│  youmi_plan_search / youmi_plan_save        （计划复用）                                │
-│  youmi_experience_search / youmi_experience_add（失败经验）                             │
-│  数据层：ToolStore / SkillStore / PlanMemory / GlobalMemory（SQLite + sqlite-vec）       │
-└──────────────────────────────▲────────────────────────────────────────────────────────┘
-                               │ agent/pre-step、tools/result、turn/end
-┌──────────────────────────────┴────────────────────────────────────────────────────────┐
-│  youmi-bridge（TS 薄插件，独立 npm 包）                                                 │
-│  youmi-tool-catalog：agent/pre-step → ctx.tools.restrict() 渐进式工具暴露               │
-│  youmi-plan-recall：agent/pre-step 注入相似计划；turn/end 归档计划轨迹                  │
-│  youmi-experience：tools/result 捕获失败；agent/pre-step 注入经验                       │
-└───────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────── DSH 宿主（Node 22+，TS，Cordis 全插件）────────────────────┐
+│  dsh web（127.0.0.1:3080）                                                       │
+│  dsh-agent-loop · dsh-session · dsh-tools · dsh-subagent · dsh-user-approval     │
+│  dsh-sandbox · dsh-compaction · dsh-skill · dsh-plan-mode · dsh-mcp-client       │
+│                                                                                  │
+│  dsh-youmi-*（本仓库插件，TS 薄适配）                                             │
+│    bridge  tool-catalog  skills  memory  plan  breaker                           │
+└───────────────────────────────┬──────────────────────────────────────────────────┘
+                                │ stdio MCP（serverName=youmi，新行分隔 JSON-RPC）
+                                ▼
+┌──────────────── YouMi sidecar（Python，逻辑与数据都在这里）─────────────────────┐
+│  tool.search / tool.get / tool.resolve      （ToolStore · ConeRetriever · Vault） │
+│  skill.index / skill.list / skill.get       （SkillStore · skill_ingest）         │
+│  plan.search / plan.save                    （PlanMemory）                        │
+│  memory.search / memory.add                 （GlobalMemory · ExperienceExtractor）│
+│  sidecar 内部：EmbeddingClient、版本路由、租户过滤、SQLite + sqlite-vec            │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 4. 能力迁移映射
+## 4. 分期计划（P0 → P6）
 
-| 能力 | YouMi 现状 | DSH 落点 | 迁移形态 |
+| 阶段 | 交付物 | 覆盖能力（清单编号） | 验收 |
 |---|---|---|---|
-| 工具目录检索 | `youmi/mcp/tool_store.py`（`ToolStore.search_cone`）、`cone.py`（`ConeRetriever`）、`vault.py`（`ToolVault` HOT/WARM/COLD） | MCP 工具 `youmi_tool_search` / `youmi_tool_load` + `youmi-tool-catalog` 插件调用 `ctx.tools.restrict()` | 服务化 + TS 插件 |
-| Skill 索引 | `youmi/mcp/skill_store.py`（`SkillStore.search_cone`、`resolve_bound_tool`）、`skill_ingest.py` | MCP 工具 `youmi_skill_search` / `youmi_skill_load`；内容经 section provider 或工具结果注入 | 服务化 + TS 薄插件（复用 DSH `skill` 包） |
-| 计划复用 | `youmi/coordinator/plan_memory.py`（`PlanMemory.search_plan`，阈值 0.85）、`planner.py` | 插件 `agent/pre-step` 注入；`turn/end` 归档；MCP `youmi_plan_search` / `youmi_plan_save` | 服务化 + TS 插件 |
-| 失败经验 | `youmi/knowledge/global_memory.py`（`search` / `batch_add`）、`experience_extractor.py`（`extract`） | 插件监听 `tools/result` 捕获失败、`turn/end` 入库、`agent/pre-step` 注入；MCP `youmi_experience_search` / `youmi_experience_add` | 服务化 + TS 插件 |
-| 工具审批 | `youmi/mcp/approval.py`（`ApprovalManager` 三级审批） | `tools/pre-execute` 返回 `ask` + `ctx.approval` | 退役，改用 DSH 原生 |
-| 沙箱 | `youmi/security/sandbox.py` | `ctx.sandbox` 后端（landlock / sandbox-exec） | 退役，改用 DSH 原生 |
-| 多 Agent 协作 / 委派 | `youmi/bus/broker.py`、`youmi/coordinator/handoff.py` | `ctx.subagents` + `dsh-tool-subagent`（可选 Agent Teams） | 退役 |
-| Agent loop | `youmi/core/agent.py` ReAct、`coordinator/master.py` | `core/agent-loop`（turn/step 流水线） | 退役 |
-| Agent 私有记忆 / 压缩 | `youmi/memory/*` | `core/session` + `ctx.compaction` | 退役 |
-| GUI | `gui/server.py`、`gui/engine/bridge.py` | `dsh web`（host/client + WebSocket/SSE 事件流） | 退役（仅保留在 `master`） |
-| 可观测性 | `youmi/observability/*`（JSONL 审计 + OTel） | DSH telemetry + `session/event` 派生；需要业务审计时落 `youmi_experience_add` | 部分保留 |
+| **P0** | Python sidecar 骨架 + `dsh-youmi-bridge` + 基线评测 | A17/A18 接口预留、B1、C17 | sidecar 可用率 100%，挂掉 fail-open；DSH 基线指标齐全（成功率为 0 的对照组不存在） |
+| **P1** | `search_tools` + 工具目录索引 + `dsh-youmi-tool-catalog` | B4–B6、B11、B13、C10、C23 | 目录覆盖 100%，p95 < 100ms，不改变原有行为 |
+| **P2** | `dsh-youmi-skills`（provider + search） | B14–B16 | skill 可列/可载，选择准确率对比基线 |
+| **P3** | `dsh-youmi-memory`（失败经验 guard + feedback）+ 可选 `dsh-youmi-breaker` | A10、A18、A19、C6–C8、C15 | held-out 重复失败率下降，误 deny < 1% |
+| **P4** | `dsh-youmi-plan`（plan cache + `run_plan` 工具）+ agent presets | A11–A16、C24 | 端到端成功率不降；计划命中精度可解释 |
+| **P5** | HOT/WARM/COLD 渐进暴露（`agent.ctx.tools.restrict`） | B7、B8 | 首工具准确率不降、总轮次不增；PTC 模式下默认关闭 |
+| **P6** | 可选 UI / 个性化（LSTM 记忆层等） | C3、C20 | 不影响主链路；默认关闭 |
 
-## 5. MCP 服务契约（serverName = `youmi`）
+执行要求：阶段顺序固定 P0→P6，**不按清单表格从上到下**；每阶段结束用 DSH 基线跑 A/B，未证明收益不进入下一阶段。
 
-- 传输：stdio，newline-delimited JSON-RPC 2.0；复用现有 `MCPServer.handle()`，只需新增 transport 壳与能力 Provider。
-- 入口：`python -m youmi.mcp.stdio_server`；`pyproject.toml` 增加 `[project.scripts] youmi-mcp = "youmi.mcp.stdio_server:main"`。
-- 环境变量：`YOUMI_DB_PATH`（默认 `~/.youmi/youmi.db`）、`YOUMI_TENANT_ID`、`YOUMI_LOG_LEVEL`。
-- 工具名在 DSH 模型侧显示为 `mcp__youmi__<rawName>`；`serverName` 与工具名是稳定契约（会话历史与权限规则依赖），只增不改，改名走"新工具 + 弃用期"。
+## 5. Sidecar 能力契约（serverName = `youmi`）
+
+- 传输：stdio，newline-delimited JSON-RPC 2.0；入口 `python -m youmi.mcp.stdio_server`（新增 `[project.scripts] youmi-mcp`）。
+- 环境变量：`YOUMI_DB_PATH`、`YOUMI_TENANT_ID`、`YOUMI_LOG_LEVEL`。
+- 模型侧工具名固定为 `mcp__youmi__<rawName>`；`serverName` 与工具名是稳定契约，只增不改。
+- **fail-open**：sidecar 未启动/超时/异常时，`dsh-youmi-bridge` 必须放行原始行为（工具目录检索失败 = 不 restrict；plan/memory 检索失败 = 不注入）。
 
 | MCP 工具（rawName） | 入参 | 出参 | 数据源 |
 |---|---|---|---|
-| `youmi_tool_search` | `query: str, top_k: int = 5, risk_ceiling: str = ""` | `[{name, score, summary, definition}]` | `ToolStore.search_cone` / `ConeRetriever` |
-| `youmi_tool_load` | `name: str` | `{name, definition, schema}` | `ToolVault` / `ToolStore` |
-| `youmi_skill_search` | `query: str, top_k: int = 5` | `[{skill_id, name, score, summary}]` | `SkillStore.search_cone` |
-| `youmi_skill_load` | `skill_id: str` | `{name, content(SOP), bound_tool}` | `SkillStore` |
-| `youmi_plan_search` | `task: str, top_k: int = 3, min_score: float = 0.85` | `[{plan_id, similarity, skeleton, steps}]` | `PlanMemory.search_plan` |
-| `youmi_plan_save` | `task: str, plan_json: dict, outcome: str` | `{plan_id}` | `PlanMemory.save_plan` |
-| `youmi_experience_search` | `query: str, top_k: int = 5` | `[{id, text, score, tags}]` | `GlobalMemory.search` |
-| `youmi_experience_add` | `task: str, failure: str, fix: str, tags: list[str]` | `{id}` | `ExperienceExtractor` + `GlobalMemory.batch_add` |
+| `youmi_tool_search` | `query, top_k=5, risk_ceiling=""` | `[{name, score, summary, definition}]` | `ToolStore.search_cone` / `ConeRetriever` |
+| `youmi_tool_get` | `name` | `{name, definition, schema}` | `ToolVault` / `ToolStore` |
+| `youmi_tool_resolve` | `name, call_path` | `{resolved_name, version}` | `version_router`（仅动态工具） |
+| `youmi_skill_index` | `query, top_k=5` | `[{skill_id, name, score, summary}]` | `SkillStore.search_cone` |
+| `youmi_skill_list` | `cursor` | `{items, next_cursor}` | `SkillStore` |
+| `youmi_skill_get` | `skill_id` | `{name, content(SOP), bound_tool}` | `SkillStore` |
+| `youmi_plan_search` | `task, top_k=3, min_score=0.85` | `[{plan_id, similarity, skeleton, steps}]` | `PlanMemory.search_plan` |
+| `youmi_plan_save` | `task, plan_json, outcome` | `{plan_id}` | `PlanMemory.save_plan` |
+| `youmi_memory_search` | `query, top_k=5` | `[{id, text, score, tags}]` | `GlobalMemory.search` |
+| `youmi_memory_add` | `task, failure, fix, tags` | `{id}` | `ExperienceExtractor` + `GlobalMemory.batch_add` |
 
-## 6. TS 薄插件：`youmi-bridge`
+## 6. DSH 插件清单
 
-目录：`dsh-plugins/youmi-bridge/`（独立 npm 包；`peerDependencies: @deepseek-ai/cordis`；ESM）。
+| 插件 | 阶段 | 扩展点 | 职责 |
+|---|---|---|---|
+| `dsh-youmi-bridge` | P0 | `ctx.systemPrompt.section()`、sidecar 连接管理 | sidecar 生命周期、健康检查、fail-open 开关、配置与日志 |
+| `dsh-youmi-tool-catalog` | P1/P5 | `agent.ctx.tools.restrict()`、`search_tools` 工具 | 工具目录检索与渐进暴露；只注册检索/加载工具，不复制工具定义 |
+| `dsh-youmi-skills` | P2 | `ctx.skills.registerProvider()` | 把 YouMi SkillStore 暴露为 DSH skill provider（只负责 list/get） |
+| `dsh-youmi-memory` | P3 | `tools/result`、`turn/end`、`agent/pre-step` | 失败证据收集、经验入库、经验注入；Guardian 子 Agent 只修 MCP/动态工具 |
+| `dsh-youmi-plan` | P4 | `agent/pre-step`、`turn/end`、`run_plan` 工具 | 计划检索/注入/归档；`run_plan` 用 `ctx.subagents.startActivation` + 拓扑排序，必须补 artifacts 数据流 |
+| `dsh-youmi-breaker` | P3（可选） | `agent/request-error`、`tools/execute` | 按失败率熔断；与 `dsh-llm-retry` 并存时避免双重重试 |
 
-| 插件 | 扩展点 | 行为 |
+约束：
+
+- 所有注册走 `ctx.effect()` / `ctx.on()`，卸载即回收；waterfall 监听必须 `next()`。
+- 不新增 session 事件类型、不改 `agent-loop`；需要持久化的状态复用 DSH `plan`/`session` 机制。
+- 插件配置使用 `cordis.yml` 的 plugin `config` 字段，不在代码里硬编码部署参数。
+
+## 7. 不迁移清单（映射到 DSH 原生）
+
+| YouMi 现状 | 处置 | DSH 替代 |
 |---|---|---|
-| `youmi-tool-catalog` | `agent/pre-step` | 取当前用户输入调用 `youmi_tool_search`，命中后 `ctx.tools.restrict()` 收紧可见工具集；保留 essential 工具；检索失败则不 restrict（降级为全量） |
-| `youmi-plan-recall` | `agent/pre-step`、`turn/end` | pre-step 调 `youmi_plan_search`（`min_score` 默认 0.85），命中经 `agent.inject()` 注入计划骨架（附 `plan_id`）；turn/end 从 session event 提取步骤轨迹并 `youmi_plan_save` |
-| `youmi-experience` | `tools/result`、`turn/end`、`agent/pre-step` | `tools/result` 观察不可变终态并缓冲失败证据；turn/end 调 `youmi_experience_add`；pre-step 调 `youmi_experience_search` 注入 Top-K（默认预算 2000 字符） |
+| `core/agent.py` ReAct、状态机、`ToolRegistry`、`ToolExecutionMixin` | 丢弃 | `dsh-agent-loop` / `dsh-tools` |
+| `HookRegistry` / `PluginManager` | 映射 | Cordis 事件监听 + scope |
+| `PromptAssembler` | 映射 | `ctx.systemPrompt.section()` |
+| `MCPIntegrationMixin` / `mcp/client.py` | 丢弃 | `dsh-mcp-client` |
+| `ApprovalManager`、`audit_gate` | 丢弃 | `dsh-user-approval` / `dsh-permission-presets` |
+| `security/sandbox.py`、`security/auth.py` | 丢弃 | `dsh-sandbox*`、`dsh-authorization` |
+| `MemoryManager`、Full/Summary、`ContextCompactor` | 丢弃 | `dsh-session`、`dsh-compaction-basic` |
+| `bus/`、`HandoffProtocol`、`SubProcessAgentRunner` | 丢弃 | `ctx.subagents`、`dsh-subagent-*` |
+| `scheduler/` | 丢弃 | `dsh-schedule` / `dsh-tool-schedule` |
+| `gateway/`、`gui/` | 丢弃 | `dsh web` / headless / ACP |
+| 多租户传播 | 丢弃 | sidecar 内保留租户过滤，DSH 无 tenant 概念 |
+| `tools/builtin.py` 9 个内置工具 | 丢弃 | `dsh-tool-fs/bash/pwsh/web`（sandbox-aware） |
+| `eval/`、`experiments/`、`MockLLMServer` | 保留 | 不进运行时，作为 P0 基线与论文实验 |
 
-- 配置项（`cordis.yml` 的 plugin `config`）：`youmiServerName`（默认 `youmi`）、`planMinScore`（0.85）、`injectBudgetChars`（2000）、`enableToolCatalog`（true）。
-- 所有注册走 `ctx.effect()` / `ctx.on()`，卸载即回收；waterfall 监听必须调用 `next()`。
-- 不新增 session 事件类型，不改 `agent-loop`；计划状态复用 DSH `plan` 包的 durable 状态。
+## 8. 已核实的 DSH API（本地源码）
 
-## 7. DSH 接入配置（profile patch 示例）
+| 结论 | 证据 |
+|---|---|
+| `ctx.subagents.startActivation(spec)` 存在 | `dsh/packages/subagent/subagent/src/index.ts:255` |
+| `ctx.skills.registerProvider(create)` 存在 | `dsh/packages/skill/skill/src/index.ts:390` |
+| `ctx.tools.restrict({allow,deny})` 存在，但**必须用 agent 作用域**（`agent.ctx`），上下文全局调用会抛错；空过滤器视为 bug | `dsh/packages/core/tools/src/index.ts:1105-1130` |
+| `agent.inject(message: UserMessage)` 只接受 UserMessage | `dsh/packages/core/agent/src/runtime-types.ts:241` |
+| 官方 MCP client 支持 stdio，工具名为 `mcp__<serverName>__<raw>`，可配 `reconnect` / `toolCallTimeoutMs` | `dsh/packages/mcp/mcp-client/README.md` |
 
-```yaml
-# profiles/youmi.patch.yml
-- id: mcp-youmi
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: youmi
-    transport: stdio
-    command: python
-    args: ['-m', 'youmi.mcp.stdio_server']
-    env:
-      YOUMI_DB_PATH: !!js process.env.YOUMI_DB_PATH
-    toolCallTimeoutMs: 60000
-    failOnStartupError: false
-    reconnect:
-      enabled: true
-
-- id: youmi-bridge
-  name: 'youmi-bridge'
-  config:
-    enableToolCatalog: true
-    planMinScore: 0.85
-    injectBudgetChars: 2000
-```
-
-启动方式：`dsh web --patch profiles/youmi.patch.yml`；`dsh --profile web --dump-config` 可校验插件树。
-
-## 8. 分阶段实施
-
-### M0 骨架（本分支首个 PR）
-- 计划文档、目录骨架（`dsh-plugins/youmi-bridge/`、`youmi/mcp/stdio_server.py`、`profiles/youmi.patch.yml`）。
-- `stdio_server` 仅实现 `initialize` / `tools/list`（空表）/ `ping`。
-- 验收：`dsh` 启动后 MCP 连接成功（工具列表为空但无错误）；`pytest` 冒烟通过。
-
-### M1 能力服务化
-- 新增四个能力 Provider（tool-catalog / skill-index / plan-memory / experience），实现第 5 节 8 个工具；租户与错误码透传。
-- 验收：每个工具单测；`dsh` 会话内实际调用成功；现有数据层表结构零改动。
-
-### M2 工具目录检索插件
-- `youmi-tool-catalog` + `ctx.tools.restrict()`；记录 restrict 前后工具数。
-- 验收：同一任务工具集由全量收敛到 Top-K 候选；session log 可完整重建每次 restrict 依据。
-
-### M3 计划复用与经验闭环
-- `youmi-plan-recall`、`youmi-experience`。
-- 验收：相似任务命中计划（相似度 ≥ 0.85）；失败任务后经验入库，且下一次同类任务 pre-step 注入命中。
-
-### M4 退役与收口
-- 删除 `gui/`、`youmi/coordinator/`、`youmi/core/agent.py`、`youmi/bus/`、`youmi/memory/`、`youmi/security/sandbox.py` 等宿主职责代码；清理对应测试。
-- README 改写为 DSH 形态；CI 调整为 `pytest` + `pnpm --filter youmi-bridge build`。
-- 验收：`dsh web` 端到端（任务 → 工具检索 → 计划复用 → 经验沉淀）跑通。
-
-## 9. 风险与对策
+## 9. 风险与回滚
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| DSH 处于 developer preview，存在破坏性变更 | 插件/配置失配 | 锁定 dsh 版本；只用文档化扩展点；升级前跑会话快照 |
-| 双栈运维（Node + Python） | 部署与排障复杂 | 单 sidecar 进程；`mcp-client` 自动重连；健康检查工具 `youmi_ping` |
-| MCP 工具名契约被破坏 | 会话历史与权限规则失效 | `serverName` 固定 `youmi`；工具名只增不改 |
-| 现有 SQLite 数据不兼容 | 历史能力数据不可用 | 复用现有 store 与表结构，迁移期只加索引不改列 |
-| 团队不熟 Cordis | 插件开发效率低 | 计划内附 cookbook 链接；`youmi-bridge` 保持 3 个文件的最小形态 |
-| `dsh-shell` 方向失败 | 投入浪费 | `master` 完整保留原形态；能力层与宿主层解耦，回滚成本仅限插件与服务壳 |
+| DSH `0.2.1-rc.2` 为 developer preview，存在破坏性变更 | 插件/配置失配 | 锁定版本 + SHA；只用第 8 节核实过的扩展点；升级前跑 P0 基线 |
+| 双栈运维（Node + Python） | 排障复杂 | 单 sidecar；`dsh-mcp-client` 自动重连；插件内 fail-open |
+| `tools.restrict` 破坏 prefix cache | P5 收益被抵消 | P5 默认关闭，仅 PTC 外启用；A/B 验证总轮次 |
+| `agent.inject` 只收 UserMessage | 注入形态受限 | 经验/计划以 UserMessage 注入；控制预算（默认 2000 字符） |
+| 工具名契约被破坏 | 会话历史/权限规则失效 | `serverName=youmi` 固定，工具名只增不改 |
+| `dsh-shell` 方向失败 | 投入浪费 | `master` 完整保留；sidecar 与插件解耦，可整体回退 |
 
-## 10. 非目标
+## 10. 待验证
 
-- 不 fork / vendor DSH 源码，不改其内核包。
-- 不在 `dsh-shell` 重新实现 agent loop、会话持久化、审批、沙箱与 UI。
-- 不以 `deepseek-harness-sdk`（Python 子进程 SDK）作为主集成路径；该 SDK 仅作为后续自动化入口的备选。
-
-## 11. 待验证事项
-
-- DSH `skill` 包的数据模型与 YouMi `SkillStore` 字段（`bound_tool_name`、SOP 内容格式）的兼容性——M1 前验证。
-- DSH telemetry 能否覆盖 YouMi 现有审计需求；不能覆盖的部分落 `youmi_experience_add`。
-- Windows 下 stdio MCP 子进程的回收与重连行为（`reconnect.maxAttempts` 默认 10）。
+- DSH skill provider 的 `SkillProvider` 返回结构与本仓库 `SkillStore` 字段（`bound_tool_name`、SOP 格式）的映射细节——P2 前完成。
+- `dsh-llm-retry` 与 `dsh-youmi-breaker` 的职责边界，避免双重重试——P3 前完成。
+- Windows 下 stdio MCP 子进程回收与 `reconnect.maxAttempts`（默认 10）的实际表现——P0 验证。
+- P0 基线任务集与指标（成功率、总轮次、首工具准确率、p95 延迟）需固化，供 P1–P5 A/B 使用。

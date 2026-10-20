@@ -21,3 +21,6 @@ venv/
 .youmi_tools.db
 gui/data/
 /PATH
+
+# 本地 DSH 源码（浅克隆参考/运行用，不入库；版本见 docs/dsh-shell-migration-plan.md）
+/dsh/
