@@ -45,38 +45,71 @@ MCP 传输由 DSH 自带的 `@deepseek-ai/dsh-mcp-client` 负责，
 
 ## 挂载
 
-把 `cordis.patch.yml` 合并进 DSH profile，替换其中 `<path-to-YouMi_Agent>`：
+### 方式一：用仓库脚本（推荐）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-dsh.ps1
+```
+
+脚本会装好 `.dsh-runtime`、编译本插件、按本机绝对路径生成
+`cordis.local.patch.yml`，然后启动 web profile。首次约 3 分钟，之后是秒级。
+
+### 方式二：手工挂载
+
+把 `cordis.patch.yml` 合并进 profile（或写到 `$DSH_HOME/cordis.patch.yml` 自动生效），
+替换其中 `<path-to-YouMi_Agent>`，并把 `name` 改成**编译产物文件**：
 
 ```yaml
-- insert:
-    - id: mcp-youmi
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        transport: stdio
-        serverName: youmi
-        command: python
-        args: ['-m', 'youmi.mcp.stdio_server']
-        cwd: '<path-to-YouMi_Agent>'
-        env:
-          YOUMI_DATA_DIR: '<path-to-YouMi_Agent>/.youmi'
-        failOnStartupError: false
-
     - id: youmi-bridge
-      name: '@youmi/dsh-bridge'
+      name: 'C:\path\to\YouMi_Agent\dsh-plugins\youmi-bridge\lib\index.js'
       config:
         toolPrefix: 'mcp__youmi__'
 ```
 
-本插件需要先被 DSH 解析到，两种方式任选：
+## 三个必须知道的加载约束
 
-```bash
-# 方式一：在 DSH 仓库里 link 本地目录
-cd /path/to/deepseek-harness
-pnpm add --filter <目标包> link:/path/to/YouMi_Agent/dsh-plugins/youmi-bridge
-pnpm --filter @youmi/dsh-bridge build
+实测启动时会依次撞上这三条，都不是 DSH 的 bug，而是 ESM 与依赖解析的固有行为。
 
-# 方式二：发布到私有 registry 后按普通依赖安装
+**1. `name` 不能写目录——ESM 不读 `package.json` 的 `main`**
+
+写目录会报 `ERR_UNSUPPORTED_DIR_IMPORT`，必须指到 `lib/index.js` 文件。
+（绝对路径会被 loader 转成 `file://` URL，中文路径也能正确处理。）
+
+**2. 插件要能解析到 `@deepseek-ai/schemastery`，但不能自带 `cordis`**
+
+本插件 `src/index.ts` 里 `cordis` 与 `dsh-system-prompt` 都是 `import type`，
+编译后只剩 `import z from '@deepseek-ai/schemastery'`（运行时唯一真实依赖）。
+
+- 自带一份 `cordis` → 出现**双 cordis 实例**，插件的 `inject` 不会被同一容器解析，静默失效
+- 什么都不带 → `ERR_MODULE_NOT_FOUND`
+
+因此本机做法是在 `node_modules/@deepseek-ai/` 下建 junction 指向 DSH 运行时那一份：
+
+```powershell
+New-Item -ItemType Junction -Path dsh-plugins\youmi-bridge\node_modules\@deepseek-ai\schemastery `
+  -Target .dsh-runtime\node_modules\@deepseek-ai\schemastery
 ```
+
+这与 DSH 自己 `pnpm` 的 `nodeLinker: hoisted` + `autoInstallPeers: false` 是同一个思路：
+**peer 不落地，共享宿主那一份实例**。
+
+**3. 编译期的 `@deepseek-ai/*` 类型解析**
+
+仓库里的 `tsconfig.json` 不写死本机路径；构建时用 `tsconfig.local.json` 覆盖：
+
+```json
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@deepseek-ai/*": ["../../.dsh-runtime/node_modules/@deepseek-ai/*"] },
+    "typeRoots": ["../../.dsh-runtime/node_modules/@types"]
+  },
+  "include": ["src"]
+}
+```
+
+启动脚本会自动生成这份 override（已在 `.gitignore` 中）。
 
 ## 工具清单
 

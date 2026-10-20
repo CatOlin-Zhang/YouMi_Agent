@@ -25,6 +25,17 @@ venv/
 # 本地 DSH 源码（浅克隆参考/运行用，不入库；版本见 docs/dsh-shell-migration-plan.md）
 /dsh/
 
+# 本地 DSH 运行时（npm 安装的 @deepseek-ai/dsh，含 typescript 构建工具）
+/.dsh-runtime/
+
+# 本机路径配置（绝对路径因机而异，模板见 dsh-plugins/youmi-bridge/cordis.patch.yml）
+/cordis.local.patch.yml
+
 # DSH 插件构建产物
 node_modules/
 dsh-plugins/*/lib/
+dsh-plugins/*/tsconfig.local.json
+
+# A/B 实验运行产物（沙箱、逐步日志、中间 patch）；
+# 已归档的结论与原始数据在 docs/experiments/ 下，不受此规则影响
+/.ab/

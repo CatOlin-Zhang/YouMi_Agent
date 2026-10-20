@@ -2,6 +2,7 @@
 #
 # 复制到 DSH profile 的 cordis.patch.yml，或用 `dsh --patch` 加载本文件。
 # 使用前把 <path-to-YouMi_Agent> 替换成本机仓库绝对路径。
+# 不想手改就用仓库脚本：scripts/start-dsh.ps1（自动按本机路径生成配置）。
 #
 # 整体分两步：
 #   1. mcp-client 以 stdio 子进程拉起 Python sidecar；
@@ -11,7 +12,9 @@
       name: '@deepseek-ai/dsh-mcp-client'
       config:
         transport: stdio
+        # 工具名固定为 mcp__youmi__<工具>，不要改
         serverName: youmi
+        # 建议写 Python 绝对路径：mcp-client 会清理环境变量，PATH 不可靠
         command: python
         args:
           - '-m'
@@ -27,7 +30,9 @@
         failOnStartupError: false
 
     - id: youmi-bridge
-      name: '@youmi/dsh-bridge'
+      # 必须指向编译产物文件：ESM 不读目录的 package.json main
+      # （先跑 npm/pnpm 构建，或用 scripts/start-dsh.ps1）
+      name: '<path-to-YouMi_Agent>/dsh-plugins/youmi-bridge/lib/index.js'
       config:
         # mcp-client 生成的工具名前缀，需与 serverName 对应
         toolPrefix: 'mcp__youmi__'

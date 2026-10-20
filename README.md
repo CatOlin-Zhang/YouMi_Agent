@@ -71,6 +71,8 @@ YouMi_Agent/
 │   └── _vec_utils.py   # sqlite-vec 与 Python 余弦的共用工具
 ├── dsh-plugins/
 │   └── youmi-bridge/   # DSH Cordis 插件：注入 youmi_* 使用指引
+├── scripts/
+│   └── start-dsh.ps1   # 一键装运行时 + 编译插件 + 启动 DSH web
 ├── tests/              # 233 个用例，全部针对 sidecar 能力
 └── docs/               # 迁移计划与设计文档
 ```
@@ -110,28 +112,36 @@ echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | python -m youmi.mcp.stdi
 
 ## 挂载到 DSH
 
-在 DSH profile 的 `cordis.patch.yml` 中加入：
+### 一键启动（推荐）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-dsh.ps1
+```
+
+脚本做四件事：把 `@deepseek-ai/dsh` 装到 `.dsh-runtime`（忽略入库）、按本机路径
+生成 `cordis.local.patch.yml`、编译 `youmi-bridge`、启动 web profile。
+首次约 3 分钟，之后直接秒级启动。浏览器会打开带一次性 token 的地址。
+
+跑单轮任务（不开 UI）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-dsh.ps1 -HeadlessTask "读取 README 并总结"
+```
+
+### 手工挂载
+
+把 `dsh-plugins/youmi-bridge/cordis.patch.yml` 合进 profile（或写到
+`$DSH_HOME/cordis.patch.yml` 自动生效），替换 `<path-to-YouMi_Agent>` 并把插件的
+`name` 指向**编译产物文件** `lib/index.js`（ESM 不支持目录 import）：
 
 ```yaml
-- insert:
-    - id: mcp-youmi
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        transport: stdio
-        serverName: youmi
-        command: python
-        args: ['-m', 'youmi.mcp.stdio_server']
-        cwd: '<path-to-YouMi_Agent>'
-        env:
-          YOUMI_DATA_DIR: '<path-to-YouMi_Agent>/.youmi'
-        failOnStartupError: false
-
     - id: youmi-bridge
-      name: '@youmi/dsh-bridge'
+      name: 'C:\path\to\YouMi_Agent\dsh-plugins\youmi-bridge\lib\index.js'
 ```
 
 模型看到的工具名形如 `mcp__youmi__youmi_tool_search`。
-插件的完整说明见 [`dsh-plugins/youmi-bridge/README.md`](dsh-plugins/youmi-bridge/README.md)。
+三个加载约束（目录 import、peer 依赖、构建期类型覆盖）见
+[`dsh-plugins/youmi-bridge/README.md`](dsh-plugins/youmi-bridge/README.md#三个必须知道的加载约束)。
 
 ## 工具清单
 

@@ -114,7 +114,8 @@ git -C dsh -c http.proxy=http://127.0.0.1:7897 pull --ff-only
 - 不新增 session 事件类型、不改 `agent-loop`
 - 部署参数全部走 `cordis.yml` 的 plugin `config`，代码不硬编码路径
 
-`cordis.patch.yml` 示例见 `dsh-plugins/youmi-bridge/cordis.patch.yml`。
+`cordis.patch.yml` 示例见 `dsh-plugins/youmi-bridge/cordis.patch.yml`；
+本机一键启动用 `scripts/start-dsh.ps1`（装运行时 → 生成路径配置 → 编译插件 → 起 web）。
 
 ## 7. 已删除清单（映射到 DSH 原生）
 
@@ -162,6 +163,31 @@ pytest -q                                                  # 233 passed
 改为先用 `typing.get_type_hints` 解析注解，失败再回退。回归用例在
 `tests/test_capabilities.py`。
 
+### 实机启动（`@deepseek-ai/dsh@0.2.1-rc.2` + web profile）
+
+```
+[dsh] 启动 DSH web：http://127.0.0.1:8080      ← 无 did not activate 警告
+INFO youmi.mcp.tool_store: ToolStore initialized with sqlite-vec: .youmi\tools.db
+INFO youmi.plan.plan_memory: PlanMemory initialized: .youmi\plans.db, vec=True
+INFO youmi.knowledge.global_memory: GlobalMemory initialized with sqlite-vec
+INFO youmi.mcp.server: Registered provider 'youmi' with 10 tools: [...]
+INFO __main__: sidecar 就绪: 10 个工具, 降级组件=无
+```
+
+两个条目都挂载成功（`mcp-youmi` 拉 sidecar、`youmi-bridge` 注入提示段）。
+挂载途中依次撞到三个约束，均已写进插件 README：
+
+1. 插件 `name` 写目录 → `ERR_UNSUPPORTED_DIR_IMPORT`；必须指向 `lib/index.js`
+   ——loader 会把绝对路径转 `file://` URL，中文路径也能正确处理
+2. 插件解析不到 `@deepseek-ai/schemastery` → `ERR_MODULE_NOT_FOUND`；
+   建 junction 指向 DSH 运行时那一份，且**不能**自带 `cordis`
+   （双实例会让 `inject` 静默失效）
+3. 构建期缺 `@deepseek-ai/*` 类型 → `tsconfig.local.json` 覆盖 `paths` + `typeRoots`
+
+另一个环境事实：本机 npm 11 拦截了 5 个包的 install script
+（`dsh-subprocess-local` / `koffi` / `node-pty` 等），web profile 启动不受影响；
+若后续用到 terminal 或子进程类工具，需要 `npm install-scripts approve`。
+
 ## 9. 已核实的 DSH API（本地源码）
 
 | 结论 | 证据 |
@@ -184,7 +210,14 @@ pytest -q                                                  # 233 passed
 
 ## 11. 待验证
 
-- DSH 实机挂载 sidecar 后的基线：成功率、总轮次、首工具准确率、p95 延迟
+已实机验证：web profile 下 `dsh-mcp-client` 拉起 sidecar、10 个工具注册、
+`youmi-bridge` 提示段加载、web UI 可达（HTTP 200）。
+
+仍待验证：
+
+- 基线指标：成功率、总轮次、首工具准确率、p95 延迟
+  （用 `scripts/start-dsh.ps1 -HeadlessTask "..."` 跑）
+- 提示段效果：模型是否真的在合适时机调用 `youmi_*`，需要实际对话样本
 - Windows 下 stdio 子进程回收与 `reconnect.maxAttempts`（默认 10）表现
 - 是否把 `SkillStore` 直接接成 `ctx.skills.registerProvider`，替代 `youmi_skill_*` 工具
 - `youmi_plan_save` 的 `plan_json` 是否要兼容 DSH `dsh-plan` 的计划结构
